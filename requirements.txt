@@ -4,7 +4,8 @@ discord.py>=2.3.0
 # HuggingFace Integration
 huggingface_hub>=0.16.0
 
-# Model Inference
+# Model Inference - CPU ONLY (no CUDA)
+# PyTorch CPU version (~200MB, faster install)
 torch>=2.0.0
 torchvision
 
