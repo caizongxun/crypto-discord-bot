@@ -5,6 +5,7 @@ Crypto Discord Bot
 
 Downloads models from HuggingFace and sends crypto price predictions to Discord
 Automatically detects all available models in models/saved/ directory
+Fetches real-time data from Binance and generates trading signals
 
 Usage:
   python bot.py
@@ -17,6 +18,7 @@ Requirements:
   - torch
   - pandas
   - scikit-learn
+  - ccxt (for Binance data)
 """
 
 import os
@@ -212,7 +214,7 @@ class Config:
         
         # 如果有手動配置的幣種，就使用手動配置；否則使用自動偵測
         manual_symbols = os.getenv('CRYPTO_SYMBOLS')
-        if manual_symbols and manual_symbols != 'BTC,ETH,SOL,BNB,XRP':
+        if manual_symbols and manual_symbols.strip() and manual_symbols != 'BTC,ETH,SOL,BNB,XRP':
             crypto_symbols = [s.strip().upper() for s in manual_symbols.split(',')]
             logger.info(f"✓ Using manually configured symbols: {', '.join(crypto_symbols)}")
         elif auto_detected_symbols:
@@ -332,14 +334,15 @@ class ModelManager:
     
     async def predict(self, symbol):
         """
-        Get prediction for a symbol
+        Get prediction for a symbol (with real-time data fetching)
         """
         if not self.ready or not self.bot_predictor:
             logger.warning(f"Model manager not ready, skipping prediction for {symbol}")
             return None
         
         try:
-            prediction = self.bot_predictor.predict(symbol)
+            # Call the async predict method
+            prediction = await self.bot_predictor.predict(symbol, '1h')
             return prediction
         
         except Exception as e:
@@ -385,22 +388,25 @@ class CryptoPredictorBot(commands.Cog):
     async def prediction_loop(self):
         """
         Main prediction loop - runs at configured interval
+        Fetches real-time data and generates trading signals
         """
         try:
             if not self.channel or not self.model_manager.ready:
                 return
             
-            logger.info(f"Starting prediction cycle for {len(self.config['crypto_symbols'])} symbols...")
+            logger.info(f"\n{'='*80}")
+            logger.info(f"🔄 Starting prediction cycle for {len(self.config['crypto_symbols'])} symbols...")
+            logger.info(f"{'='*80}")
             
             predictions = {}
             for symbol in self.config['crypto_symbols']:
                 prediction = await self.model_manager.predict(symbol)
                 if prediction:
                     predictions[symbol] = prediction
-                await asyncio.sleep(1)  # Rate limiting
+                await asyncio.sleep(2)  # Rate limiting (2 sec between requests)
             
             if predictions:
-                await self._send_predictions(predictions)
+                await self._send_trading_signals(predictions)
             else:
                 logger.warning("No successful predictions this cycle")
         
@@ -419,48 +425,90 @@ class CryptoPredictorBot(commands.Cog):
             seconds=self.config['prediction_interval']
         )
     
-    async def _send_predictions(self, predictions):
+    async def _send_trading_signals(self, predictions):
         """
-        Send prediction embed to Discord
+        Send trading signals to Discord with detailed information
         """
         try:
-            embed = discord.Embed(
-                title="📊 Crypto Price Predictions",
-                description=f"Predictions at {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
-                color=discord.Color.blue()
-            )
+            for symbol, signal in predictions.items():
+                if not signal:
+                    continue
+                
+                # Determine color based on signal type
+                if 'STRONG_BUY' in signal.get('signal_type', ''):
+                    color = discord.Color.green()
+                elif 'BUY' in signal.get('signal_type', ''):
+                    color = discord.Color.from_rgb(0, 200, 100)
+                elif 'STRONG_SELL' in signal.get('signal_type', ''):
+                    color = discord.Color.red()
+                elif 'SELL' in signal.get('signal_type', ''):
+                    color = discord.Color.from_rgb(200, 0, 0)
+                else:
+                    color = discord.Color.blue()
+                
+                embed = discord.Embed(
+                    title=f"🎯 {symbol} Trading Signal",
+                    description=f"**{signal.get('recommendation', 'HOLD')}**",
+                    color=color
+                )
+                
+                # Price Information
+                embed.add_field(
+                    name="💰 Price Information",
+                    value=(
+                        f"Current: `${signal.get('current_price', 0):.2f}`\n"
+                        f"Predicted: `${signal.get('predicted_price', 0):.2f}`\n"
+                        f"Change: `{signal.get('price_change_percent', 0):+.2f}%`"
+                    ),
+                    inline=False
+                )
+                
+                # Trading Strategy
+                embed.add_field(
+                    name="📈 Trading Strategy",
+                    value=(
+                        f"Entry: `${signal.get('entry_point', 0):.2f}`\n"
+                        f"🎯 High Target: `${signal.get('high_target', 0):.2f}`\n"
+                        f"🛑 Low Target: `${signal.get('low_target', 0):.2f}`\n"
+                        f"Stop Loss: `${signal.get('stop_loss', 0):.2f}`\n"
+                        f"Take Profit: `${signal.get('take_profit', 0):.2f}`"
+                    ),
+                    inline=False
+                )
+                
+                # Technical Analysis
+                embed.add_field(
+                    name="📊 Technical Analysis",
+                    value=(
+                        f"Trend: `{signal.get('trend', 'UNKNOWN')}`\n"
+                        f"Support: `${signal.get('support', 0):.2f}`\n"
+                        f"Resistance: `${signal.get('resistance', 0):.2f}`\n"
+                        f"RSI: `{signal.get('rsi', 0):.2f}`\n"
+                        f"ATR: `${signal.get('atr', 0):.4f}`"
+                    ),
+                    inline=False
+                )
+                
+                # Confidence
+                confidence = signal.get('confidence', 0)
+                confidence_bar = "█" * int(confidence * 20) + "░" * (20 - int(confidence * 20))
+                embed.add_field(
+                    name="🎯 Confidence",
+                    value=f"{confidence_bar} {confidence*100:.1f}%",
+                    inline=False
+                )
+                
+                embed.set_footer(
+                    text=f"Analysis Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')} | Model V8"
+                )
+                
+                await self.channel.send(embed=embed)
+                await asyncio.sleep(1)  # Delay between messages
             
-            for symbol, prediction in predictions.items():
-                if prediction:
-                    current = prediction.get('current_price', 0)
-                    predicted = prediction.get('corrected_price', 0)
-                    direction = prediction.get('direction', '?')
-                    confidence = prediction.get('confidence', 0)
-                    
-                    change = ((predicted - current) / current * 100) if current > 0 else 0
-                    change_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-                    
-                    field_value = (
-                        f"Current: `${current:.2f}`\n"
-                        f"Predicted: `${predicted:.2f}`\n"
-                        f"Change: `{change:+.2f}%` {change_emoji}\n"
-                        f"Direction: `{direction}`\n"
-                        f"Confidence: `{confidence*100:.1f}%`"
-                    )
-                    
-                    embed.add_field(
-                        name=f"{symbol}",
-                        value=field_value,
-                        inline=True
-                    )
-            
-            embed.set_footer(text="Model V8 | Crypto Price Predictor")
-            
-            await self.channel.send(embed=embed)
-            logger.info(f"✓ Sent predictions for {len(predictions)} symbols")
+            logger.info(f"✓ Sent {len(predictions)} trading signals")
         
         except Exception as e:
-            logger.error(f"✗ Failed to send predictions: {e}")
+            logger.error(f"✗ Failed to send trading signals: {e}")
             logger.error(traceback.format_exc())
     
     @commands.command(name='predict')
@@ -476,24 +524,17 @@ class CryptoPredictorBot(commands.Cog):
         
         if prediction:
             embed = discord.Embed(
-                title=f"📊 {symbol} Price Prediction",
+                title=f"🎯 {symbol} Trading Signal",
+                description=f"**{prediction.get('recommendation', 'HOLD')}**",
                 color=discord.Color.green()
             )
             
-            current = prediction.get('current_price', 0)
-            predicted = prediction.get('corrected_price', 0)
-            direction = prediction.get('direction', '?')
-            confidence = prediction.get('confidence', 0)
-            
-            change = ((predicted - current) / current * 100) if current > 0 else 0
-            change_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-            
-            embed.add_field(name="Current Price", value=f"${current:.2f}", inline=True)
-            embed.add_field(name="Predicted Price", value=f"${predicted:.2f}", inline=True)
-            embed.add_field(name="Change", value=f"{change:+.2f}% {change_emoji}", inline=True)
-            embed.add_field(name="Direction", value=f"`{direction}`", inline=True)
-            embed.add_field(name="Confidence", value=f"{confidence*100:.1f}%", inline=True)
-            embed.add_field(name="Time", value=f"<t:{int(datetime.now().timestamp())}:R>", inline=True)
+            embed.add_field(name="Current Price", value=f"${prediction.get('current_price', 0):.2f}", inline=True)
+            embed.add_field(name="Predicted Price", value=f"${prediction.get('predicted_price', 0):.2f}", inline=True)
+            embed.add_field(name="Entry Point", value=f"${prediction.get('entry_point', 0):.2f}", inline=True)
+            embed.add_field(name="Take Profit", value=f"${prediction.get('take_profit', 0):.2f}", inline=True)
+            embed.add_field(name="Stop Loss", value=f"${prediction.get('stop_loss', 0):.2f}", inline=True)
+            embed.add_field(name="Confidence", value=f"{prediction.get('confidence', 0)*100:.1f}%", inline=True)
             
             embed.set_footer(text="Model V8 | Crypto Price Predictor")
             
