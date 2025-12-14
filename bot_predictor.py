@@ -723,4 +723,60 @@ class BotPredictor:
             logger.info(f"  Recommendation: {recommendation}")
             
             # 8️⃣ Build result
-            result = {\n                'symbol': symbol,\n                'current_price': float(current_price),\n                'predicted_price': float(corrected_price),\n                'price_change_percent': float(price_change),\n                'trend': trend,\n                'signal_type': signal_type,\n                'recommendation': recommendation,\n                'entry_point': float(entry_point),\n                'high_target': float(high_point),\n                'low_target': float(low_point),\n                'stop_loss': float(low_point * 0.98),\n                'take_profit': float(high_point * 1.02),\n                'support': float(support),\n                'resistance': float(resistance),\n                'rsi': float(rsi),\n                'macd': float(macd),\n                'atr': float(atr),\n                'confidence': float(confidence),\n                'timestamp': datetime.now().isoformat(),\n            }\n            \n            logger.info(f\"{'='*60}\\n\")\n            return result\n        \n        except Exception as e:\n            logger.error(f\"✗ Prediction failed for {symbol}: {e}\")\n            import traceback\n            logger.error(traceback.format_exc())\n            return None\n\n\n# For backward compatibility\nclass Predictor(BotPredictor):\n    \"\"\"Legacy name for BotPredictor\"\"\"\n    pass\n\n\nif __name__ == '__main__':\n    import asyncio\n    \n    logging.basicConfig(\n        level=logging.INFO,\n        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'\n    )\n    \n    # Test the predictor\n    async def test():\n        predictor = BotPredictor()\n        test_symbols = ['BTC', 'ETH', 'SOL']\n        \n        for symbol in test_symbols:\n            result = await predictor.predict(symbol, '1h')\n            if result:\n                print(f\"\\n✓ {symbol}: {result['recommendation']}\")\n    \n    asyncio.run(test())\n", "_requires_user_approval": false}
+            result = {
+                'symbol': symbol,
+                'current_price': float(current_price),
+                'predicted_price': float(corrected_price),
+                'price_change_percent': float(price_change),
+                'trend': trend,
+                'signal_type': signal_type,
+                'recommendation': recommendation,
+                'entry_point': float(entry_point),
+                'high_target': float(high_point),
+                'low_target': float(low_point),
+                'stop_loss': float(low_point * 0.98),
+                'take_profit': float(high_point * 1.02),
+                'support': float(support),
+                'resistance': float(resistance),
+                'rsi': float(rsi),
+                'macd': float(macd),
+                'atr': float(atr),
+                'confidence': float(confidence),
+                'timestamp': datetime.now().isoformat(),
+            }
+            
+            logger.info(f"{'='*60}\n")
+            return result
+        
+        except Exception as e:
+            logger.error(f"✗ Prediction failed for {symbol}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+
+
+# For backward compatibility
+class Predictor(BotPredictor):
+    """Legacy name for BotPredictor"""
+    pass
+
+
+if __name__ == '__main__':
+    import asyncio
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Test the predictor
+    async def test():
+        predictor = BotPredictor()
+        test_symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in test_symbols:
+            result = await predictor.predict(symbol, '1h')
+            if result:
+                print(f"\n✓ {symbol}: {result['recommendation']}")
+    
+    asyncio.run(test())
