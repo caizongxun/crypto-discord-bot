@@ -32,59 +32,44 @@ warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
 
 
-class FlexibleLSTMModel(torch.nn.Module):
-    """Flexible LSTM model that matches the training architecture"""
+class CryptoLSTMModel(torch.nn.Module):
+    """LSTM model matching the training architecture"""
     
-    def __init__(self, input_size=44, hidden_size=128, num_layers=2, output_size=1, 
-                 use_regressor=True, bidirectional=True):
-        super(FlexibleLSTMModel, self).__init__()
+    def __init__(self, input_size=44, hidden_size=256, num_layers=2, output_size=1):
+        super(CryptoLSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.input_size = input_size
-        self.bidirectional = bidirectional
         
-        # LSTM layer
+        # Bidirectional LSTM
         self.lstm = torch.nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=0.2 if num_layers > 1 else 0,
-            bidirectional=bidirectional
+            dropout=0.2,
+            bidirectional=True
         )
         
-        # Output layer
-        lstm_output_size = hidden_size * (2 if bidirectional else 1)
-        
-        if use_regressor:
-            # Match original architecture: regressor with 3 layers
-            self.regressor = torch.nn.Sequential(
-                torch.nn.Linear(lstm_output_size, 64),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(0.2),
-                torch.nn.Linear(64, 32),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(0.2),
-                torch.nn.Linear(32, output_size)
-            )
-        else:
-            # Fallback: simple fc layers
-            self.fc = torch.nn.Sequential(
-                torch.nn.Linear(lstm_output_size, 32),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(0.2),
-                torch.nn.Linear(32, output_size)
-            )
+        # Regressor: bidirectional LSTM outputs 2*hidden_size = 512
+        lstm_output_size = hidden_size * 2
+        self.regressor = torch.nn.Sequential(
+            torch.nn.Linear(lstm_output_size, 64),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(64, 32),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(32, output_size)
+        )
     
     def forward(self, x):
+        # x shape: (batch, seq_len, input_size) or (batch, input_size)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # (batch, input_size) -> (batch, 1, input_size)
+        
         lstm_out, _ = self.lstm(x)
-        last_output = lstm_out[:, -1, :]
-        
-        if hasattr(self, 'regressor'):
-            output = self.regressor(last_output)
-        else:
-            output = self.fc(last_output)
-        
+        last_output = lstm_out[:, -1, :]  # Take last time step
+        output = self.regressor(last_output)
         return output
 
 
@@ -329,50 +314,6 @@ class BotPredictor:
         # Load bias corrections
         self._load_bias_corrections()
     
-    def _detect_model_architecture(self, state_dict: Dict) -> Tuple[bool, bool]:
-        """
-        Detect model architecture from state_dict keys
-        Returns: (use_regressor, bidirectional)
-        """
-        keys = list(state_dict.keys())
-        
-        # Check for regressor vs fc
-        use_regressor = any('regressor' in key for key in keys)
-        
-        # Check for bidirectional (reverse layers)
-        bidirectional = any('reverse' in key for key in keys)
-        
-        return use_regressor, bidirectional
-    
-    def _infer_model_params(self, state_dict: Dict) -> Dict:
-        """
-        Infer model parameters from state_dict
-        """
-        keys = list(state_dict.keys())
-        params = {}
-        
-        # Infer input_size from first LSTM weight
-        for key in keys:
-            if 'lstm.weight_ih_l0' in key and 'reverse' not in key:
-                shape = state_dict[key].shape
-                # LSTM weight_ih shape: (4*hidden_size, input_size)
-                params['input_size'] = shape[1]
-                params['hidden_size'] = shape[0] // 4
-                break
-        
-        # Infer num_layers from lstm keys
-        num_layers = 0
-        for key in keys:
-            if key.startswith('lstm.weight_ih_l'):
-                layer_num = int(key.split('_l')[1].split('_')[0])
-                num_layers = max(num_layers, layer_num + 1)
-        params['num_layers'] = num_layers
-        
-        # Output size is always 1 for price prediction
-        params['output_size'] = 1
-        
-        return params
-    
     def _load_all_models(self):
         """Load all available models from models/"""
         try:
@@ -391,50 +332,32 @@ class BotPredictor:
                     match = re.match(r'^([A-Za-z]+)', stem)
                     if match:
                         symbol = match.group(1).upper()
-                        logger.info(f"Loading model for {symbol} from {model_file.name}...")
+                        logger.info(f"Loading {symbol} from {model_file.name}...")
                         
                         # Load checkpoint
                         checkpoint = torch.load(model_file, map_location=self.device)
                         
-                        # Check if it's a state_dict or complete model
-                        if isinstance(checkpoint, dict) and 'lstm.weight_ih_l0' in checkpoint:
-                            # This is a state_dict
-                            use_regressor, bidirectional = self._detect_model_architecture(checkpoint)
-                            params = self._infer_model_params(checkpoint)
-                            
-                            logger.debug(f"  Architecture: use_regressor={use_regressor}, bidirectional={bidirectional}")
-                            logger.debug(f"  Params: {params}")
-                            
-                            # Create model with detected architecture
-                            model = FlexibleLSTMModel(
-                                input_size=params.get('input_size', 44),
-                                hidden_size=params.get('hidden_size', 128),
-                                num_layers=params.get('num_layers', 2),
-                                output_size=params.get('output_size', 1),
-                                use_regressor=use_regressor,
-                                bidirectional=bidirectional
-                            )
-                            
-                            # Load state_dict
-                            model.load_state_dict(checkpoint)
-                            model.eval()
-                            self.models[symbol] = model
-                            logger.info(f"✓ Loaded {symbol} model from state_dict")
-                        else:
-                            # This is a complete model object
-                            checkpoint.eval()
-                            self.models[symbol] = checkpoint
-                            logger.info(f"✓ Loaded {symbol} model")
+                        # Create model and load state_dict
+                        model = CryptoLSTMModel(
+                            input_size=44,
+                            hidden_size=256,
+                            num_layers=2,
+                            output_size=1
+                        )
+                        model.load_state_dict(checkpoint)
+                        model.eval()
+                        self.models[symbol] = model
+                        logger.info(f"✓ {symbol} loaded successfully")
                     else:
                         logger.warning(f"Could not extract symbol from {model_file.name}")
                 
                 except Exception as e:
-                    logger.error(f"✗ Failed to load {model_file}: {str(e)[:200]}")
+                    logger.error(f"✗ Failed to load {model_file.name}: {str(e)[:200]}")
             
-            logger.info(f"✓ Successfully loaded {len(self.models)} models")
+            logger.info(f"✓ Total loaded: {len(self.models)} models")
         
         except Exception as e:
-            logger.error(f"Failed to load models: {e}")
+            logger.error(f"Failed to load models directory: {e}")
     
     def _load_bias_corrections(self):
         """Load bias corrections for each model"""
@@ -513,11 +436,7 @@ class BotPredictor:
             
             model = self.models[symbol]
             with torch.no_grad():
-                try:
-                    predicted_price = model(X).item()
-                except:
-                    X_flat = torch.tensor(recent_prices, dtype=torch.float32, device=self.device).unsqueeze(0)
-                    predicted_price = model(X_flat).item()
+                predicted_price = model(X).item()
             
             corrected_price = self._apply_bias_correction(symbol, predicted_price)
             logger.info(f"  Raw Prediction: ${predicted_price:.2f}")
