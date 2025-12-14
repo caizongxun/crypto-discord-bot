@@ -35,12 +35,13 @@ logger = logging.getLogger(__name__)
 class CryptoLSTMModel(torch.nn.Module):
     """LSTM model matching the training architecture"""
     
-    def __init__(self, input_size=44, hidden_size=256, num_layers=2, output_size=1):
+    def __init__(self, input_size=44, hidden_size=64, num_layers=2, output_size=1):
         super(CryptoLSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         
-        # Bidirectional LSTM
+        # Bidirectional LSTM with hidden_size=64
+        # Output will be 64*2=128 after bidirectional concatenation
         self.lstm = torch.nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -50,14 +51,14 @@ class CryptoLSTMModel(torch.nn.Module):
             bidirectional=True
         )
         
-        # Regressor: bidirectional LSTM outputs 2*hidden_size = 512
-        # State dict has keys: regressor.0.weight/bias, regressor.3.weight/bias, regressor.5.weight/bias
-        lstm_output_size = hidden_size * 2  # 512
+        # Regressor: bidirectional LSTM outputs 2*hidden_size = 128
+        # State dict has keys: regressor.0, regressor.3, regressor.5
+        lstm_output_size = hidden_size * 2  # 64 * 2 = 128
         
-        # Build regressor using Sequential (names will be 0, 1, 2, ...)
-        # But only layers 0, 3, 5 have learnable parameters
+        # Build regressor using Sequential (indices 0, 1, 2, 3, 4, 5)
+        # Only layers 0, 3, 5 have learnable parameters
         self.regressor = torch.nn.Sequential(
-            torch.nn.Linear(lstm_output_size, 64),   # regressor.0: 512 -> 64
+            torch.nn.Linear(lstm_output_size, 64),   # regressor.0: 128 -> 64
             torch.nn.ReLU(),                          # regressor.1: activation
             torch.nn.Dropout(0.2),                    # regressor.2: dropout
             torch.nn.Linear(64, 32),                  # regressor.3: 64 -> 32
@@ -344,7 +345,7 @@ class BotPredictor:
                         # Create model and load state_dict
                         model = CryptoLSTMModel(
                             input_size=44,
-                            hidden_size=256,
+                            hidden_size=64,
                             num_layers=2,
                             output_size=1
                         )
