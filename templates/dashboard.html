@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Prediction Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(120deg, #60a5fa, #34d399);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .timestamp {
+            color: #94a3b8;
+            font-size: 0.9em;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            margin: 10px 0;
+            color: #60a5fa;
+        }
+
+        .stat-label {
+            color: #94a3b8;
+            font-size: 0.9em;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: linear-gradient(120deg, #60a5fa, #34d399);
+            border: none;
+            border-radius: 6px;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(96, 165, 250, 0.3);
+        }
+
+        .filter-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid rgba(148, 163, 184, 0.2);
+        }
+
+        .tab-btn {
+            padding: 10px 20px;
+            background: transparent;
+            border: none;
+            border-bottom: 3px solid transparent;
+            color: #94a3b8;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+        }
+
+        .tab-btn.active {
+            color: #60a5fa;
+            border-bottom-color: #60a5fa;
+        }
+
+        .tab-btn:hover {
+            color: #e2e8f0;
+        }
+
+        .predictions-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .prediction-card {
+            background: rgba(30, 41, 59, 0.8);
+            border: 2px solid rgba(148, 163, 184, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .prediction-card:hover {
+            border-color: rgba(96, 165, 250, 0.5);
+            box-shadow: 0 10px 30px rgba(96, 165, 250, 0.1);
+        }
+
+        .prediction-card.long {
+            border-top: 4px solid #34d399;
+        }
+
+        .prediction-card.short {
+            border-top: 4px solid #f87171;
+        }
+
+        .prediction-card.neutral {
+            border-top: 4px solid #fbbf24;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .symbol {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #60a5fa;
+        }
+
+        .signal-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .signal-badge.long {
+            background: rgba(52, 211, 153, 0.2);
+            color: #34d399;
+        }
+
+        .signal-badge.short {
+            background: rgba(248, 113, 113, 0.2);
+            color: #f87171;
+        }
+
+        .signal-badge.neutral {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+        }
+
+        .price-info {
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+        }
+
+        .price-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            font-size: 0.95em;
+        }
+
+        .price-label {
+            color: #94a3b8;
+        }
+
+        .price-value {
+            color: #e2e8f0;
+            font-weight: 600;
+            font-family: 'Monaco', monospace;
+        }
+
+        .entry-info {
+            margin-top: 15px;
+            padding: 12px;
+            background: rgba(96, 165, 250, 0.1);
+            border-left: 3px solid #60a5fa;
+            border-radius: 6px;
+            font-size: 0.9em;
+        }
+
+        .entry-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 6px 0;
+        }
+
+        .confidence {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(148, 163, 184, 0.2);
+        }
+
+        .confidence-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(148, 163, 184, 0.2);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .confidence-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #60a5fa, #34d399);
+            transition: width 0.5s ease;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #94a3b8;
+        }
+
+        .error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.5);
+            color: #fca5a5;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 1.8em;
+            }
+
+            .predictions-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        .refresh-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: #34d399;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 Crypto Prediction Dashboard</h1>
+            <p class="timestamp">
+                <span class="refresh-indicator"></span>
+                <span id="timestamp">Loading...</span>
+            </p>
+        </header>
+
+        <div class="stats" id="stats">
+            <div class="stat-card">
+                <div class="stat-label">Total Symbols</div>
+                <div class="stat-value" id="total-symbols">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">LONG Signals</div>
+                <div class="stat-value" style="color: #34d399;" id="long-signals">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">SHORT Signals</div>
+                <div class="stat-value" style="color: #f87171;" id="short-signals">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg Confidence</div>
+                <div class="stat-value" id="avg-confidence">-</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button onclick="refreshData()">🔄 Refresh</button>
+            <button onclick="exportData()">📥 Export</button>
+        </div>
+
+        <div class="filter-tabs">
+            <button class="tab-btn active" onclick="filterSignals('all')">All Signals</button>
+            <button class="tab-btn" onclick="filterSignals('long')">LONG 📈</button>
+            <button class="tab-btn" onclick="filterSignals('short')">SHORT 📉</button>
+        </div>
+
+        <div id="error" class="error hidden"></div>
+
+        <div id="loading" class="loading">
+            <p>Loading predictions...</p>
+        </div>
+
+        <div id="predictions" class="predictions-grid hidden"></div>
+    </div>
+
+    <script>
+        let allPredictions = {};
+        let currentFilter = 'all';
+
+        async function fetchPredictions() {
+            try {
+                const response = await fetch('/api/predictions');
+                const data = await response.json();
+                
+                allPredictions = data.predictions;
+                updateTimestamp(data.timestamp);
+                renderPredictions();
+                
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('predictions').classList.remove('hidden');
+            } catch (error) {
+                showError(`Error fetching predictions: ${error.message}`);
+            }
+        }
+
+        async function fetchStatistics() {
+            try {
+                const response = await fetch('/api/statistics');
+                const data = await response.json();
+                
+                document.getElementById('total-symbols').textContent = data.total_symbols;
+                document.getElementById('long-signals').textContent = data.long_signals;
+                document.getElementById('short-signals').textContent = data.short_signals;
+                document.getElementById('avg-confidence').textContent = (data.avg_confidence * 100).toFixed(1) + '%';
+            } catch (error) {
+                console.error('Error fetching statistics:', error);
+            }
+        }
+
+        function updateTimestamp(timestamp) {
+            const date = new Date(timestamp);
+            document.getElementById('timestamp').textContent = date.toLocaleString();
+        }
+
+        function renderPredictions() {
+            const container = document.getElementById('predictions');
+            container.innerHTML = '';
+            
+            let filtered = Object.entries(allPredictions);
+            
+            if (currentFilter === 'long') {
+                filtered = filtered.filter(([_, p]) => p.signal_type === 'LONG');
+            } else if (currentFilter === 'short') {
+                filtered = filtered.filter(([_, p]) => p.signal_type === 'SHORT');
+            }
+            
+            if (filtered.length === 0) {
+                container.innerHTML = '<p style="text-align: center; color: #94a3b8;">No predictions available</p>';
+                return;
+            }
+            
+            filtered.forEach(([symbol, prediction]) => {
+                const card = createPredictionCard(symbol, prediction);
+                container.appendChild(card);
+            });
+        }
+
+        function createPredictionCard(symbol, prediction) {
+            const card = document.createElement('div');
+            const signalType = prediction.signal_type || 'NEUTRAL';
+            card.className = `prediction-card ${signalType.toLowerCase()}`;
+            
+            const confidence = (prediction.confidence_score * 100).toFixed(1);
+            const current = prediction.current_price?.toFixed(2) || 'N/A';
+            const entry = prediction.entry_price?.toFixed(2) || 'N/A';
+            const sl = prediction.stop_loss?.toFixed(2) || 'N/A';
+            const tp = prediction.take_profit?.toFixed(2) || 'N/A';
+            const support = prediction.support?.toFixed(2) || 'N/A';
+            const resistance = prediction.resistance?.toFixed(2) || 'N/A';
+            
+            card.innerHTML = `
+                <div class="card-header">
+                    <div class="symbol">${symbol}</div>
+                    <span class="signal-badge ${signalType.toLowerCase()}">${signalType}</span>
+                </div>
+                
+                <div class="price-info">
+                    <div class="price-row">
+                        <span class="price-label">Current Price:</span>
+                        <span class="price-value">$${current}</span>
+                    </div>
+                    <div class="price-row">
+                        <span class="price-label">Trend:</span>
+                        <span class="price-value">${prediction.trend || 'N/A'}</span>
+                    </div>
+                    <div class="price-row">
+                        <span class="price-label">Support:</span>
+                        <span class="price-value">$${support}</span>
+                    </div>
+                    <div class="price-row">
+                        <span class="price-label">Resistance:</span>
+                        <span class="price-value">$${resistance}</span>
+                    </div>
+                </div>
+                
+                <div class="entry-info">
+                    <div class="entry-row">
+                        <span>Entry:</span>
+                        <strong>$${entry}</strong>
+                    </div>
+                    <div class="entry-row">
+                        <span>Stop Loss:</span>
+                        <strong>$${sl}</strong>
+                    </div>
+                    <div class="entry-row">
+                        <span>Take Profit:</span>
+                        <strong>$${tp}</strong>
+                    </div>
+                </div>
+                
+                <div class="confidence">
+                    <div class="price-row">
+                        <span class="price-label">Confidence:</span>
+                        <span class="price-value">${confidence}%</span>
+                    </div>
+                    <div class="confidence-bar">
+                        <div class="confidence-fill" style="width: ${confidence}%"></div>
+                    </div>
+                </div>
+            `;
+            
+            return card;
+        }
+
+        function filterSignals(filter) {
+            currentFilter = filter;
+            
+            document.querySelectorAll('.filter-tabs .tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            event.target.classList.add('active');
+            renderPredictions();
+        }
+
+        async function refreshData() {
+            await fetchPredictions();
+            await fetchStatistics();
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.classList.remove('hidden');
+            setTimeout(() => errorDiv.classList.add('hidden'), 5000);
+        }
+
+        function exportData() {
+            const dataStr = JSON.stringify(allPredictions, null, 2);
+            const dataBlob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `predictions-${new Date().toISOString().slice(0, 10)}.json`;
+            link.click();
+        }
+
+        // Initial load and refresh every 30 seconds
+        fetchPredictions();
+        fetchStatistics();
+        
+        setInterval(async () => {
+            await refreshData();
+        }, 30000);
+    </script>
+</body>
+</html>
