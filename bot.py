@@ -1,626 +1,485 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Crypto Discord Bot
-
-Downloads models from HuggingFace and sends crypto price predictions to Discord
-Automatically detects all available models in models/ directory
-Fetches real-time data from multiple exchanges and generates trading signals
-
-Usage:
-  python bot.py
-
-Requirements:
-  - .env file with Discord and HuggingFace tokens
-  - Python 3.8+
-  - discord.py
-  - huggingface_hub
-  - torch
-  - pandas
-  - scikit-learn
-  - ccxt (for Binance data)
+Crypto Discord Bot - Real-time Price Prediction
+Automatically loads models from HuggingFace and provides trading signals
 """
 
 import os
-import sys
 import asyncio
 import logging
-from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime
-import traceback
-import re
 
-# Configure logging
+from bot_predictor import CryptoPredictor
+
+load_dotenv()
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# Initialize Discord Bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.guild_messages = True
 
-class ModelDetector:
-    """自動偵測和提取模型幣種"""
-    
-    @staticmethod
-    def detect_symbols_from_models():
-        """
-        從 models/ 目錄自動偵測所有可用模型
-        提取模型檔名中的幣種 (例如: BTC_model_v8.pth -> BTC)
-        """
-        models_dir = Path('models')  # 改成 models（不是 models/saved）
-        symbols = set()
-        
-        if not models_dir.exists():
-            logger.warning(f"⚠️  Models directory not found: {models_dir}")
-            return []
-        
-        # 掃描所有 .pth 檔案
-        model_files = list(models_dir.glob('*.pth'))
-        
-        if not model_files:
-            logger.warning(f"⚠️  No model files found in {models_dir}")
-            return []
-        
-        logger.info(f"\n🔍 Found {len(model_files)} model files:")
-        
-        for model_file in model_files:
-            filename = model_file.stem  # 不含副檔名
-            
-            # 嘗試從檔名中提取幣種
-            # 支援的格式: BTC_model_v8, BTC_model, btc_model_v8, BTC_v8 等
-            # 第1步: 嘗試正一的格式
-            match = re.match(r'^([A-Za-z]+)', filename)
-            
-            if match:
-                symbol = match.group(1).upper()
-                
-                # 第2步: 檢查是否是有效的幣種
-                # 也接受整數作为幣種（不是BTC但是2345）
-                if len(symbol) <= 6 and not symbol.isdigit():
-                    symbols.add(symbol)
-                    logger.info(f"  ✓ {filename} -> {symbol}")
-                else:
-                    logger.warning(f"  ⚠️  Invalid symbol extracted from {filename}: {symbol}")
-            else:
-                logger.warning(f"  ⚠️  Could not extract symbol from {filename}")
-        
-        sorted_symbols = sorted(list(symbols))
-        logger.info(f"✓ Detected {len(sorted_symbols)} unique symbols: {', '.join(sorted_symbols)}")
-        
-        if len(sorted_symbols) == 0:
-            logger.warning("⚠️  No valid symbols detected. Make sure model files are named like 'BTC_model_v8.pth'")
-        
-        return sorted_symbols
+bot = commands.Bot(command_prefix='.', intents=intents)
+
+# Global predictor instance
+predictor: CryptoPredictor = None
+
+# Store prediction results for dashboard
+prediction_cache = {}
 
 
-class Config:
-    """Load and store configuration from .env"""
+@bot.event
+async def on_ready():
+    """Bot is ready to receive commands"""
+    logger.info(f'✓ Bot logged in as {bot.user}')
+    logger.info(f'✓ Bot ID: {bot.user.id}')
     
-    @staticmethod
-    def find_env_file():
-        """
-        自動搜尋 .env 檔案
-        """
-        search_paths = [
-            Path.cwd() / ".env",
-            Path(__file__).parent / ".env",
-            Path(__file__).parent.parent / ".env",
-            Path.home() / ".env",
-        ]
-        
-        for env_path in search_paths:
-            if env_path.exists():
-                logger.info(f"✓ Found .env at: {env_path}")
-                return str(env_path)
-        
-        logger.warning("⚠️  .env file not found in standard locations")
-        return None
+    # Start prediction loop
+    if not prediction_loop.is_running():
+        prediction_loop.start()
+        logger.info('✓ Prediction loop started')
+
+
+@bot.command(name='models')
+async def cmd_list_models(ctx):
+    """
+    列出所有加載的模型及其詳細信息
+    Usage: .models
+    """
+    if not predictor or not predictor.models:
+        await ctx.send('❌ No models loaded')
+        return
     
-    @staticmethod
-    def read_env_file(env_path):
-        """
-        強化版 .env 檔案讀取
-        """
-        env_dict = {}
-        
-        try:
-            encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
-            
-            for encoding in encodings:
-                try:
-                    with open(env_path, 'r', encoding=encoding) as f:
-                        content = f.read()
-                    logger.info(f"✓ Successfully read .env with encoding: {encoding}")
-                    break
-                except UnicodeDecodeError:
-                    continue
-            else:
-                logger.error("✗ Could not read .env file with any encoding")
-                return env_dict
-            
-            for line in content.split('\n'):
-                line = line.strip()
-                
-                if not line or line.startswith('#'):
-                    continue
-                
-                if '=' in line:
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    
-                    if value.startswith('"') and value.endswith('"'):
-                        value = value[1:-1]
-                    elif value.startswith("'") and value.endswith("'"):
-                        value = value[1:-1]
-                    
-                    if '#' in value:
-                        value = value.split('#')[0].strip()
-                    
-                    env_dict[key] = value
-            
-            logger.info(f"✓ Parsed {len(env_dict)} variables from .env")
-            return env_dict
-        
-        except Exception as e:
-            logger.error(f"✗ Error reading .env file: {e}")
-            return env_dict
+    embed = discord.Embed(
+        title='📊 Loaded Cryptocurrency Models',
+        description=f'Total: {len(predictor.models)} models',
+        color=discord.Color.blue(),
+        timestamp=datetime.utcnow()
+    )
     
-    @staticmethod
-    def load():
-        """
-        Load configuration from .env
-        自動偵測模型幣種
-        """
-        env_file = Config.find_env_file()
-        if env_file:
-            logger.info(f"Loading environment from: {env_file}")
-            env_dict = Config.read_env_file(env_file)
-            
-            for key, value in env_dict.items():
-                os.environ[key] = value
-            
-            load_dotenv(env_file, override=True, encoding='utf-8')
+    # Group models by status
+    loaded = []
+    failed = []
+    
+    for symbol, info in predictor.model_info.items():
+        if info['status'] == 'loaded':
+            loaded.append(f"✓ **{symbol}**\n  Input: {info['input_features']} | Hidden: {info['hidden_size']} | Output: {info['output_features']}")
         else:
-            logger.warning("⚠️  No .env file found, trying system environment")
-            load_dotenv()
-        
-        # Required Discord config
-        discord_token = os.getenv('DISCORD_BOT_TOKEN')
-        channel_id = os.getenv('DISCORD_CHANNEL_ID')
-        
-        if not discord_token:
-            logger.error("✗ DISCORD_BOT_TOKEN not found in .env")
-            raise ValueError("DISCORD_BOT_TOKEN is required")
-        
-        if not channel_id:
-            logger.error("✗ DISCORD_CHANNEL_ID not found in .env")
-            raise ValueError("DISCORD_CHANNEL_ID is required")
-        
-        # Optional HuggingFace config
-        hf_token = os.getenv('HUGGINGFACE_TOKEN')
-        hf_repo_id = os.getenv('HUGGINGFACE_REPO_ID', 'zongowo111/crypto_model')
-        
-        # Bot config
-        prediction_interval = int(os.getenv('PREDICTION_INTERVAL', '3600'))
-        
-        # 自動偵測模型幣種
-        logger.info("\n🔍 Auto-detecting available models...")
-        auto_detected_symbols = ModelDetector.detect_symbols_from_models()
-        
-        # 如果有手動配置的幣種，就使用手動配置；否則使用自動偵測
-        manual_symbols = os.getenv('CRYPTO_SYMBOLS')
-        if manual_symbols and manual_symbols.strip() and manual_symbols != 'BTC,ETH,SOL,BNB,XRP':
-            crypto_symbols = [s.strip().upper() for s in manual_symbols.split(',')]
-            logger.info(f"✓ Using manually configured symbols ({len(crypto_symbols)}): {', '.join(crypto_symbols)}")
-        elif auto_detected_symbols and len(auto_detected_symbols) > 0:
-            crypto_symbols = auto_detected_symbols
-            logger.info(f"✓ Using auto-detected symbols ({len(crypto_symbols)}): {', '.join(crypto_symbols)}")
-        else:
-            # 預設值 (如果沒有自動偵測到)
-            logger.warning("⚠️  No models found, using default symbols")
-            crypto_symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP']
-            logger.info(f"🚧 Using {len(crypto_symbols)} default symbols: {', '.join(crypto_symbols)}")
-        
-        logger.info(f"\n✓ Configuration loaded successfully")
-        logger.info(f"  Discord Channel: {channel_id}")
-        logger.info(f"  HuggingFace Repo: {hf_repo_id}")
-        logger.info(f"  Prediction Interval: {prediction_interval}s ({prediction_interval//3600}h)")
-        logger.info(f"  Crypto Symbols ({len(crypto_symbols)}): {', '.join(sorted(crypto_symbols))}")
-        
-        return {
-            'discord_token': discord_token,
-            'channel_id': int(channel_id),
-            'hf_token': hf_token,
-            'hf_repo_id': hf_repo_id,
-            'prediction_interval': prediction_interval,
-            'crypto_symbols': crypto_symbols
-        }
-
-
-class ModelManager:
-    """Manage model downloads and predictions"""
+            failed.append(f"✗ {symbol} - {info.get('error', 'Unknown error')}")
     
-    def __init__(self, hf_token, hf_repo_id):
-        self.hf_token = hf_token
-        self.hf_repo_id = hf_repo_id
-        self.bot_predictor = None
-        self.ready = False
-    
-    async def initialize(self):
-        """
-        Initialize model manager and load models
-        """
-        try:
-            logger.info("\n🚀 Initializing model manager...")
-            
-            # Check if models exist
-            models_dir = Path('models')
-            if models_dir.exists() and len(list(models_dir.glob('*.pth'))) > 0:
-                model_count = len(list(models_dir.glob('*.pth')))
-                logger.info(f"✓ Found {model_count} models locally")
-            else:
-                logger.warning(f"⚠️  No models found in {models_dir}")
-            
-            # Import and initialize predictor
-            logger.info("Loading bot predictor...")
-            try:
-                from bot_predictor import BotPredictor
-                self.bot_predictor = BotPredictor()
-                self.ready = True
-                logger.info("✓ Bot predictor loaded successfully")
-            except ImportError:
-                logger.error("✗ bot_predictor.py not found")
-                logger.info("  Downloading from HuggingFace...")
-                await self._download_bot_predictor()
-                from bot_predictor import BotPredictor
-                self.bot_predictor = BotPredictor()
-                self.ready = True
-                logger.info("✓ Bot predictor loaded successfully")
-        
-        except Exception as e:
-            logger.error(f"✗ Failed to initialize model manager: {e}")
-            logger.error(traceback.format_exc())
-            self.ready = False
-    
-    async def _download_bot_predictor(self):
-        """
-        Download bot_predictor.py from HuggingFace
-        """
-        try:
-            from huggingface_hub import hf_hub_download
-            
-            logger.info("Downloading bot_predictor.py...")
-            
-            hf_hub_download(
-                repo_id=self.hf_repo_id,
-                filename="bot_predictor.py",
-                repo_type="model",
-                local_dir=".",
-                token=self.hf_token
-            )
-            
-            logger.info("✓ bot_predictor.py downloaded successfully")
-        
-        except Exception as e:
-            logger.error(f"✗ bot_predictor.py download failed: {e}")
-            raise
-    
-    async def predict(self, symbol):
-        """
-        Get prediction for a symbol (with real-time data fetching)
-        """
-        if not self.ready or not self.bot_predictor:
-            logger.warning(f"Model manager not ready, skipping prediction for {symbol}")
-            return None
-        
-        try:
-            # Call the async predict method
-            prediction = await self.bot_predictor.predict(symbol, '1h')
-            return prediction
-        
-        except Exception as e:
-            logger.error(f"✗ Prediction failed for {symbol}: {e}")
-            return None
-
-
-class CryptoPredictorBot(commands.Cog):
-    """Discord bot cog for crypto predictions"""
-    
-    def __init__(self, bot, config):
-        self.bot = bot
-        self.config = config
-        self.model_manager = ModelManager(
-            config['hf_token'],
-            config['hf_repo_id']
+    if loaded:
+        embed.add_field(
+            name='✅ Successfully Loaded',
+            value='\n'.join(loaded[:10]),  # Max 10 per field
+            inline=False
         )
-        self.channel = None
+        if len(loaded) > 10:
+            embed.add_field(
+                name='... and more',
+                value=f'Total loaded: {len(loaded)}',
+                inline=False
+            )
     
-    @commands.Cog.listener()
-    async def on_ready(self):
-        """Called when bot is ready"""
-        logger.info(f"\n🤖 Bot logged in as {self.bot.user}")
-        
-        # Get channel
-        self.channel = self.bot.get_channel(self.config['channel_id'])
-        if not self.channel:
-            logger.error(f"✗ Channel {self.config['channel_id']} not found")
+    if failed:
+        embed.add_field(
+            name='❌ Failed to Load',
+            value='\n'.join(failed[:5]),
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command(name='predict')
+async def cmd_predict(ctx, symbol: str = None):
+    """
+    獲得特定幣種的實時預測
+    Usage: .predict BTC  或  .predict (預測所有)
+    """
+    if not predictor:
+        await ctx.send('❌ Predictor not initialized')
+        return
+    
+    if symbol:
+        symbol = symbol.upper()
+        if symbol not in prediction_cache:
+            await ctx.send(f'❌ No prediction for {symbol}. Try `.models` to see available')
             return
         
-        logger.info(f"✓ Connected to channel: {self.channel.name}")
+        result = prediction_cache[symbol]
+        embed = _create_prediction_embed(symbol, result)
+        await ctx.send(embed=embed)
+    else:
+        # Show all predictions
+        if not prediction_cache:
+            await ctx.send('⏳ No predictions available yet. Please wait for the first cycle...')
+            return
         
-        # Initialize model manager
-        await self.model_manager.initialize()
-        
-        if self.model_manager.ready:
-            logger.info("✓ All systems ready, starting prediction loop")
-            self.prediction_loop.start()
-        else:
-            logger.error("✗ Model manager not ready, prediction loop not started")
+        # Send up to 5 embeds (Discord rate limiting)
+        symbols = list(prediction_cache.keys())[:5]
+        for sym in symbols:
+            result = prediction_cache[sym]
+            embed = _create_prediction_embed(sym, result)
+            await ctx.send(embed=embed)
+            await asyncio.sleep(0.5)  # Rate limiting
+
+
+@bot.command(name='signal')
+async def cmd_signal(ctx, symbol: str = None):
+    """
+    獲得交易信號 (LONG/SHORT + 入場點)
+    Usage: .signal BTC  或  .signal (所有信號)
+    """
+    if not predictor:
+        await ctx.send('❌ Predictor not initialized')
+        return
     
-    @tasks.loop(seconds=None)
-    async def prediction_loop(self):
-        """
-        Main prediction loop - runs at configured interval
-        Fetches real-time data and generates trading signals
-        """
+    if symbol:
+        symbol = symbol.upper()
+        if symbol not in prediction_cache:
+            await ctx.send(f'❌ No signal for {symbol}')
+            return
+        
+        result = prediction_cache[symbol]
+        embed = _create_signal_embed(symbol, result)
+        await ctx.send(embed=embed)
+    else:
+        # Show signals with highest confidence
+        if not prediction_cache:
+            await ctx.send('⏳ No signals available yet...')
+            return
+        
+        # Sort by confidence and send top 5
+        sorted_signals = sorted(
+            prediction_cache.items(),
+            key=lambda x: x[1].get('confidence_score', 0),
+            reverse=True
+        )[:5]
+        
+        for sym, result in sorted_signals:
+            embed = _create_signal_embed(sym, result)
+            await ctx.send(embed=embed)
+            await asyncio.sleep(0.5)
+
+
+@bot.command(name='stats')
+async def cmd_stats(ctx):
+    """
+    顯示機器人統計信息
+    Usage: .stats
+    """
+    if not predictor:
+        await ctx.send('❌ Predictor not initialized')
+        return
+    
+    embed = discord.Embed(
+        title='📈 Bot Statistics',
+        color=discord.Color.green(),
+        timestamp=datetime.utcnow()
+    )
+    
+    total_models = len(predictor.model_info)
+    loaded_count = sum(1 for info in predictor.model_info.values() if info['status'] == 'loaded')
+    failed_count = total_models - loaded_count
+    
+    embed.add_field(
+        name='Models',
+        value=f'Loaded: {loaded_count}/{total_models}\nFailed: {failed_count}',
+        inline=True
+    )
+    
+    embed.add_field(
+        name='Predictions',
+        value=f'Cached: {len(prediction_cache)}\nLast update: {predictor.last_update or "Never"}',
+        inline=True
+    )
+    
+    embed.add_field(
+        name='API Status',
+        value=f'Exchange: {predictor.exchange_fallback[0] if predictor.exchange_fallback else "Checking..."}',
+        inline=False
+    )
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command(name='dashboard')
+async def cmd_dashboard(ctx):
+    """
+    顯示網頁儀表板的 URL
+    Usage: .dashboard
+    """
+    dashboard_url = os.getenv('DASHBOARD_URL', 'http://localhost:5000')
+    
+    embed = discord.Embed(
+        title='📊 Prediction Dashboard',
+        description=f'[Open Dashboard]({dashboard_url})',
+        color=discord.Color.purple(),
+        timestamp=datetime.utcnow()
+    )
+    
+    embed.add_field(
+        name='Features',
+        value='✓ Real-time predictions\n✓ All cryptocurrencies\n✓ Trading signals\n✓ Technical analysis',
+        inline=False
+    )
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command(name='reload')
+async def cmd_reload(ctx):
+    """
+    重新加載所有模型
+    Usage: .reload
+    """
+    async with ctx.typing():
         try:
-            if not self.channel or not self.model_manager.ready:
+            global predictor
+            logger.info('Reloading models...')
+            predictor = CryptoPredictor()
+            await predictor.initialize()
+            
+            embed = discord.Embed(
+                title='✓ Models Reloaded',
+                description=f'Successfully loaded {len(predictor.models)} models',
+                color=discord.Color.green()
+            )
+            await ctx.send(embed=embed)
+        except Exception as e:
+            logger.error(f'Error reloading models: {e}')
+            await ctx.send(f'❌ Error reloading: {str(e)}')
+
+
+@bot.command(name='test')
+async def cmd_test(ctx):
+    """
+    測試單個幣種的完整流程
+    Usage: .test BTC
+    """
+    if not predictor:
+        await ctx.send('❌ Predictor not initialized')
+        return
+    
+    async with ctx.typing():
+        try:
+            # Test with BTC or first available model
+            test_symbol = 'BTC'
+            if test_symbol not in predictor.models:
+                test_symbol = list(predictor.models.keys())[0] if predictor.models else None
+            
+            if not test_symbol:
+                await ctx.send('❌ No models available for testing')
                 return
             
-            logger.info(f"\n{'='*80}")
-            logger.info(f"🔄 Starting prediction cycle for {len(self.config['crypto_symbols'])} symbols...")
-            logger.info(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            logger.info(f"{'='*80}")
+            result = await predictor.predict_single(test_symbol)
             
-            predictions = {}
-            for i, symbol in enumerate(self.config['crypto_symbols'], 1):
-                logger.info(f"\n[{i}/{len(self.config['crypto_symbols'])}] Processing {symbol}...")
-                prediction = await self.model_manager.predict(symbol)
-                if prediction:
-                    predictions[symbol] = prediction
-                await asyncio.sleep(2)  # Rate limiting (2 sec between requests)
-            
-            if predictions:
-                await self._send_trading_signals(predictions)
-                logger.info(f"\n✓ Prediction cycle completed for {len(predictions)} symbols")
-            else:
-                logger.warning("No successful predictions this cycle")
-        
-        except Exception as e:
-            logger.error(f"✗ Prediction loop error: {e}")
-            logger.error(traceback.format_exc())
-    
-    @prediction_loop.before_loop
-    async def before_prediction_loop(self):
-        """
-        Wait until bot is ready before starting prediction loop
-        """
-        await self.bot.wait_until_ready()
-        # Set the interval
-        self.prediction_loop.change_interval(
-            seconds=self.config['prediction_interval']
-        )
-    
-    async def _send_trading_signals(self, predictions):
-        """
-        Send trading signals to Discord with detailed information
-        """
-        try:
-            for symbol, signal in predictions.items():
-                if not signal:
-                    continue
-                
-                # Determine color based on signal type
-                if 'STRONG_BUY' in signal.get('signal_type', ''):
-                    color = discord.Color.green()
-                elif 'BUY' in signal.get('signal_type', ''):
-                    color = discord.Color.from_rgb(0, 200, 100)
-                elif 'STRONG_SELL' in signal.get('signal_type', ''):
-                    color = discord.Color.red()
-                elif 'SELL' in signal.get('signal_type', ''):
-                    color = discord.Color.from_rgb(200, 0, 0)
-                else:
-                    color = discord.Color.blue()
-                
-                embed = discord.Embed(
-                    title=f"🎯 {symbol} Trading Signal",
-                    description=f"**{signal.get('recommendation', 'HOLD')}**",
-                    color=color
-                )
-                
-                # Price Information
-                embed.add_field(
-                    name="💰 Price Information",
-                    value=(
-                        f"Current: `${signal.get('current_price', 0):.2f}`\n"
-                        f"Predicted: `${signal.get('predicted_price', 0):.2f}`\n"
-                        f"Change: `{signal.get('price_change_percent', 0):+.2f}%`"
-                    ),
-                    inline=False
-                )
-                
-                # Trading Strategy
-                embed.add_field(
-                    name="📈 Trading Strategy",
-                    value=(
-                        f"Entry: `${signal.get('entry_point', 0):.2f}`\n"
-                        f"🎯 High Target: `${signal.get('high_target', 0):.2f}`\n"
-                        f"🛑 Low Target: `${signal.get('low_target', 0):.2f}`\n"
-                        f"Stop Loss: `${signal.get('stop_loss', 0):.2f}`\n"
-                        f"Take Profit: `${signal.get('take_profit', 0):.2f}`"
-                    ),
-                    inline=False
-                )
-                
-                # Technical Analysis
-                embed.add_field(
-                    name="📊 Technical Analysis",
-                    value=(
-                        f"Trend: `{signal.get('trend', 'UNKNOWN')}`\n"
-                        f"Support: `${signal.get('support', 0):.2f}`\n"
-                        f"Resistance: `${signal.get('resistance', 0):.2f}`\n"
-                        f"RSI: `{signal.get('rsi', 0):.2f}`\n"
-                        f"ATR: `${signal.get('atr', 0):.4f}`"
-                    ),
-                    inline=False
-                )
-                
-                # Confidence
-                confidence = signal.get('confidence', 0)
-                confidence_bar = "█" * int(confidence * 20) + "░" * (20 - int(confidence * 20))
-                embed.add_field(
-                    name="🎯 Confidence",
-                    value=f"{confidence_bar} {confidence*100:.1f}%",
-                    inline=False
-                )
-                
-                embed.set_footer(
-                    text=f"Analysis Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')} | Model V8"
-                )
-                
-                await self.channel.send(embed=embed)
-                await asyncio.sleep(1)  # Delay between messages
-            
-            logger.info(f"✓ Sent {len(predictions)} trading signals")
-        
-        except Exception as e:
-            logger.error(f"✗ Failed to send trading signals: {e}")
-            logger.error(traceback.format_exc())
-    
-    @commands.command(name='predict')
-    async def predict_command(self, ctx, symbol: str = 'BTC'):
-        """
-        Manual prediction command
-        Usage: !predict BTC
-        """
-        symbol = symbol.upper()
-        
-        async with ctx.typing():
-            prediction = await self.model_manager.predict(symbol)
-        
-        if prediction:
             embed = discord.Embed(
-                title=f"🎯 {symbol} Trading Signal",
-                description=f"**{prediction.get('recommendation', 'HOLD')}**",
+                title=f'✓ Test Prediction: {test_symbol}',
                 color=discord.Color.green()
             )
             
-            embed.add_field(name="Current Price", value=f"${prediction.get('current_price', 0):.2f}", inline=True)
-            embed.add_field(name="Predicted Price", value=f"${prediction.get('predicted_price', 0):.2f}", inline=True)
-            embed.add_field(name="Entry Point", value=f"${prediction.get('entry_point', 0):.2f}", inline=True)
-            embed.add_field(name="Take Profit", value=f"${prediction.get('take_profit', 0):.2f}", inline=True)
-            embed.add_field(name="Stop Loss", value=f"${prediction.get('stop_loss', 0):.2f}", inline=True)
-            embed.add_field(name="Confidence", value=f"{prediction.get('confidence', 0)*100:.1f}%", inline=True)
-            
-            embed.set_footer(text="Model V8 | Crypto Price Predictor")
+            if result:
+                embed.add_field('Current Price', f"${result.get('current_price', 'N/A')}", inline=True)
+                embed.add_field('Trend', result.get('trend', 'N/A'), inline=True)
+                embed.add_field('Confidence', f"{result.get('confidence_score', 0):.2%}", inline=True)
+            else:
+                embed.add_field('Status', 'Prediction failed', inline=False)
             
             await ctx.send(embed=embed)
-        else:
-            await ctx.send(f"❌ Failed to get prediction for {symbol}")
+        except Exception as e:
+            logger.error(f'Test command error: {e}')
+            await ctx.send(f'❌ Error: {str(e)}')
+
+
+@tasks.loop(minutes=60)  # Run every hour (new 1H candle)
+async def prediction_loop():
+    """
+    自動預測循環 - 每當新的 1H K線出現時執行
+    """
+    if not predictor:
+        return
     
-    @commands.command(name='status')
-    async def status_command(self, ctx):
-        """
-        Check bot status and available symbols
-        """
-        status = "✅ Ready" if self.model_manager.ready else "❌ Not Ready"
+    try:
+        logger.info('\n' + '='*80)
+        logger.info(f'🔄 Starting prediction cycle - {datetime.utcnow().isoformat()}')
+        logger.info('='*80)
         
-        embed = discord.Embed(
-            title="🤖 Bot Status",
-            color=discord.Color.green() if self.model_manager.ready else discord.Color.red()
-        )
-        embed.add_field(name="Status", value=status, inline=False)
-        embed.add_field(name="Model Manager", value="✅ Initialized" if self.model_manager.bot_predictor else "❌ Not initialized", inline=False)
-        embed.add_field(name=f"Symbols ({len(self.config['crypto_symbols'])})", value=", ".join(sorted(self.config['crypto_symbols'])), inline=False)
-        embed.add_field(name="Interval", value=f"{self.config['prediction_interval']}s ({self.config['prediction_interval']//3600}h)", inline=False)
+        # Predict all loaded models
+        for symbol in list(predictor.models.keys()):
+            try:
+                result = await predictor.predict_single(symbol)
+                if result:
+                    prediction_cache[symbol] = result
+                    logger.info(f'✓ {symbol}: {result.get("trend", "N/A")} | Confidence: {result.get("confidence_score", 0):.2%}')
+                else:
+                    logger.warning(f'⚠️  {symbol}: No prediction result')
+            except Exception as e:
+                logger.error(f'✗ {symbol}: {str(e)}')
         
-        await ctx.send(embed=embed)
+        # Update prediction update time
+        predictor.last_update = datetime.utcnow().isoformat()
+        
+        # Optionally send summary to a specific channel
+        # await _send_summary_to_channel(bot, prediction_cache)
+        
+    except Exception as e:
+        logger.error(f'Prediction loop error: {e}')
+
+
+def _create_prediction_embed(symbol: str, result: dict) -> discord.Embed:
+    """
+    Create Discord embed for prediction result
+    """
+    embed = discord.Embed(
+        title=f'📊 {symbol}/USDT Prediction',
+        color=discord.Color.blue(),
+        timestamp=datetime.utcnow()
+    )
     
-    @commands.command(name='models')
-    async def models_command(self, ctx):
-        """
-        List all available models
-        """
-        models_dir = Path('models')
-        
-        if not models_dir.exists():
-            await ctx.send("❌ Models directory not found")
-            return
-        
-        model_files = sorted(list(models_dir.glob('*.pth')))
-        
-        if not model_files:
-            await ctx.send("❌ No models found")
-            return
-        
-        embed = discord.Embed(
-            title="📦 Available Models",
-            description=f"Total: {len(model_files)} models",
-            color=discord.Color.blue()
+    # Price and trend
+    current_price = result.get('current_price', 'N/A')
+    trend = result.get('trend', 'UNKNOWN')
+    
+    trend_emoji = '📈' if 'UP' in trend else '📉' if 'DOWN' in trend else '➡️'
+    
+    embed.add_field(
+        name='Current Price',
+        value=f'${current_price}',
+        inline=True
+    )
+    
+    embed.add_field(
+        name='3-5 Candle Trend',
+        value=f'{trend_emoji} {trend}',
+        inline=True
+    )
+    
+    # Predicted prices
+    pred_prices = result.get('predicted_prices', [])
+    if pred_prices:
+        embed.add_field(
+            name='Predicted Prices (Next 5H)',
+            value='\n'.join([f'H+{i+1}: ${p:.2f}' for i, p in enumerate(pred_prices[:5])]),
+            inline=False
         )
-        
-        # 分組顯示模型 (每個 embed field 最多 1024 字符)
-        models_text = ""
-        for i, model_file in enumerate(model_files, 1):
-            size_mb = model_file.stat().st_size / (1024 * 1024)
-            line = f"{i}. `{model_file.name}` ({size_mb:.1f} MB)\n"
-            
-            if len(models_text) + len(line) > 1000:
-                embed.add_field(name="\u200b", value=models_text, inline=False)
-                models_text = line
-            else:
-                models_text += line
-        
-        if models_text:
-            embed.add_field(name="\u200b", value=models_text, inline=False)
-        
-        await ctx.send(embed=embed)
+    
+    # Technical indicators
+    embed.add_field(
+        name='Support/Resistance',
+        value=f'Support: ${result.get("support", "N/A")}\nResistance: ${result.get("resistance", "N/A")}',
+        inline=True
+    )
+    
+    embed.add_field(
+        name='Confidence',
+        value=f"{result.get('confidence_score', 0):.2%}",
+        inline=True
+    )
+    
+    return embed
+
+
+def _create_signal_embed(symbol: str, result: dict) -> discord.Embed:
+    """
+    Create Discord embed for trading signal
+    """
+    signal_type = result.get('signal_type', 'NEUTRAL')
+    entry_price = result.get('entry_price')
+    stop_loss = result.get('stop_loss')
+    take_profit = result.get('take_profit')
+    
+    color = discord.Color.green() if 'LONG' in signal_type else discord.Color.red() if 'SHORT' in signal_type else discord.Color.yellow()
+    
+    embed = discord.Embed(
+        title=f'🎯 Trading Signal: {symbol}',
+        color=color,
+        timestamp=datetime.utcnow()
+    )
+    
+    embed.add_field(
+        name='Signal Type',
+        value=signal_type,
+        inline=True
+    )
+    
+    embed.add_field(
+        name='Confidence',
+        value=f"{result.get('confidence_score', 0):.2%}",
+        inline=True
+    )
+    
+    if entry_price:
+        embed.add_field(
+            name='Entry Price',
+            value=f'${entry_price:.2f}',
+            inline=True
+        )
+    
+    if stop_loss:
+        embed.add_field(
+            name='Stop Loss',
+            value=f'${stop_loss:.2f}',
+            inline=True
+        )
+    
+    if take_profit:
+        embed.add_field(
+            name='Take Profit',
+            value=f'${take_profit:.2f}',
+            inline=True
+        )
+    
+    trend = result.get('trend', '')
+    if trend:
+        embed.add_field(
+            name='Market Trend',
+            value=trend,
+            inline=False
+        )
+    
+    return embed
 
 
 async def main():
     """
-    Main function to start the bot
+    主程序入口
     """
-    try:
-        # Load configuration
-        logger.info("="*60)
-        logger.info("🤖 Crypto Discord Bot v2.0 - Starting")
-        logger.info("="*60)
-        
-        config = Config.load()
-        
-        # Create bot
-        intents = discord.Intents.default()
-        intents.message_content = True
-        
-        bot = commands.Bot(command_prefix='!', intents=intents)
-        
-        # Add cog
-        await bot.add_cog(CryptoPredictorBot(bot, config))
-        
-        # Start bot
-        logger.info(f"\n🚀 Connecting to Discord...")
-        await bot.start(config['discord_token'])
+    global predictor
     
+    try:
+        # Initialize predictor
+        logger.info('Initializing CryptoPredictor...')
+        predictor = CryptoPredictor()
+        await predictor.initialize()
+        logger.info(f'✓ Predictor initialized with {len(predictor.models)} models')
+        
+        # Start Discord bot
+        token = os.getenv('DISCORD_TOKEN')
+        if not token:
+            raise ValueError('DISCORD_TOKEN not found in .env')
+        
+        logger.info('Starting Discord bot...')
+        await bot.start(token)
+        
     except Exception as e:
-        logger.error(f"✗ Bot failed to start: {e}")
-        logger.error(traceback.format_exc())
-        sys.exit(1)
+        logger.error(f'Fatal error: {e}')
+        raise
 
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\n😋 Bot stopped by user")
+        logger.info('\nBot stopped by user')
     except Exception as e:
-        logger.error(f"✗ Fatal error: {e}")
-        sys.exit(1)
+        logger.error(f'Bot crashed: {e}')
