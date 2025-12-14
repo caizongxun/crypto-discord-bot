@@ -33,16 +33,15 @@ logger = logging.getLogger(__name__)
 
 
 class CryptoLSTMModel(torch.nn.Module):
-    """LSTM model matching the training architecture"""
+    """LSTM model with variable hidden_size support"""
     
-    def __init__(self, input_size=44, hidden_size=64, num_layers=2, output_size=1):
+    def __init__(self, input_size=44, hidden_size=32, num_layers=2, output_size=1):
         super(CryptoLSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.input_size = input_size
         
-        # Bidirectional LSTM with hidden_size=64
-        # Output will be 64*2=128 after bidirectional concatenation
+        # Bidirectional LSTM
         self.lstm = torch.nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -52,19 +51,17 @@ class CryptoLSTMModel(torch.nn.Module):
             bidirectional=True
         )
         
-        # Regressor: bidirectional LSTM outputs 2*hidden_size = 128
-        # State dict has keys: regressor.0, regressor.3, regressor.5
-        lstm_output_size = hidden_size * 2  # 64 * 2 = 128
+        # Bidirectional LSTM output size = hidden_size * 2
+        lstm_output_size = hidden_size * 2
         
-        # Build regressor using Sequential (indices 0, 1, 2, 3, 4, 5)
-        # Only layers 0, 3, 5 have learnable parameters
+        # Regressor with flexible input size
         self.regressor = torch.nn.Sequential(
-            torch.nn.Linear(lstm_output_size, 64),   # regressor.0: 128 -> 64
-            torch.nn.ReLU(),                          # regressor.1: activation
-            torch.nn.Dropout(0.2),                    # regressor.2: dropout
-            torch.nn.Linear(64, 32),                  # regressor.3: 64 -> 32
-            torch.nn.ReLU(),                          # regressor.4: activation
-            torch.nn.Linear(32, output_size)          # regressor.5: 32 -> 1 (output)
+            torch.nn.Linear(lstm_output_size, hidden_size * 2),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(hidden_size * 2, hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_size, output_size)
         )
     
     def forward(self, x):
@@ -322,7 +319,11 @@ class BotPredictor:
     
     def _detect_model_architecture(self, checkpoint: Dict) -> Tuple[int, int]:
         """
-        Detect the correct input_size and hidden_size from checkpoint weights
+        Detect the correct input_size and hidden_size from checkpoint weights.
+        
+        For bidirectional LSTM:
+        lstm.weight_ih_l0 shape = [hidden_size * 4 * 2, input_size]
+                               = [hidden_size * 8, input_size]
         
         Args:
             checkpoint: Model state dict
@@ -331,26 +332,24 @@ class BotPredictor:
             Tuple of (input_size, hidden_size)
         """
         try:
-            # Check lstm.weight_ih_l0 shape: (hidden_size*4, input_size) for LSTM
-            # or (hidden_size*4*2, input_size) for bidirectional
             if 'lstm.weight_ih_l0' in checkpoint:
                 weight_shape = checkpoint['lstm.weight_ih_l0'].shape
-                lstm_gates_times_hidden = weight_shape[0]  # First dimension
-                input_size = weight_shape[1]  # Second dimension
+                first_dim = weight_shape[0]  # hidden_size * 8 for bidirectional
+                input_size = weight_shape[1]  # input_size
                 
-                # For bidirectional LSTM: hidden_size = lstm_gates_times_hidden / (4 * 2)
-                # For regular LSTM: hidden_size = lstm_gates_times_hidden / 4
-                hidden_size_bi = lstm_gates_times_hidden // 8  # bidirectional
-                hidden_size_regular = lstm_gates_times_hidden // 4  # regular
+                # For bidirectional LSTM: hidden_size = first_dim / 8
+                # (4 gates per LSTM + bidirectional = 4 * 2 = 8)
+                hidden_size = first_dim // 8
                 
-                # Assume bidirectional (more common in training)
-                return input_size, hidden_size_bi
+                logger.debug(f"  Detected: lstm.weight_ih_l0 shape {weight_shape} -> input_size={input_size}, hidden_size={hidden_size}")
+                return input_size, hidden_size
             
             # Default fallback
-            return 44, 64
+            logger.warning("  Could not find lstm.weight_ih_l0, using defaults")
+            return 44, 32
         except Exception as e:
             logger.warning(f"Could not detect architecture: {e}, using defaults")
-            return 44, 64
+            return 44, 32
     
     def _load_all_models(self):
         """Load all available models from models/"""
@@ -360,7 +359,7 @@ class BotPredictor:
                 logger.warning(f"Models directory not found: {models_dir}")
                 return
             
-            model_files = list(models_dir.glob('*.pth'))
+            model_files = sorted(list(models_dir.glob('*.pth')))
             logger.info(f"Found {len(model_files)} model files")
             
             for model_file in model_files:
@@ -377,7 +376,6 @@ class BotPredictor:
                         
                         # Detect architecture from checkpoint
                         input_size, hidden_size = self._detect_model_architecture(checkpoint)
-                        logger.debug(f"  Detected architecture: input_size={input_size}, hidden_size={hidden_size}")
                         
                         # Create model with detected architecture
                         model = CryptoLSTMModel(
@@ -391,17 +389,17 @@ class BotPredictor:
                             model.load_state_dict(checkpoint)
                             model.eval()
                             self.models[symbol] = model
-                            logger.info(f"✓ {symbol} loaded successfully")
+                            logger.info(f"✓ {symbol} loaded (hidden_size={hidden_size})")
                         except RuntimeError as load_error:
-                            logger.warning(f"⚠️  Failed to load {symbol}: {str(load_error)[:150]}")
-                            logger.warning(f"   Skipping incompatible model {symbol}")
+                            logger.warning(f"⚠️  Failed to load {symbol}: {str(load_error)[:100]}")
+                            logger.warning(f"   Skipping {symbol}")
                     else:
                         logger.warning(f"Could not extract symbol from {model_file.name}")
                 
                 except Exception as e:
-                    logger.error(f"✗ Failed to load {model_file.name}: {str(e)[:200]}")
+                    logger.error(f"✗ Failed to load {model_file.name}: {str(e)[:150]}")
             
-            logger.info(f"✓ Total loaded: {len(self.models)} models")
+            logger.info(f"\n✓ Total loaded: {len(self.models)} models")
             if self.models:
                 logger.info(f"  Available symbols: {', '.join(sorted(self.models.keys()))}")
         
@@ -433,13 +431,6 @@ class BotPredictor:
     def _build_feature_vector(self, df: pd.DataFrame) -> np.ndarray:
         """
         Build 44-dimensional feature vector from OHLCV data and technical indicators.
-        
-        This matches the training data feature engineering:
-        - OHLCV features (5)
-        - Price ratios and changes (10)
-        - Moving averages (12: SMA/EMA with different periods)
-        - Momentum indicators (12: RSI, MACD, ATR variations)
-        - Volatility measures (5)
         
         Returns:
             numpy array of shape (44,)
@@ -616,15 +607,12 @@ class BotPredictor:
             logger.info(f"  MACD: {macd:.6f}")
             logger.info(f"  ATR(14): ${atr:.2f}")
             
-            # 4️⃣ Model Prediction - BUILD PROPER 44-DIMENSIONAL FEATURE VECTOR
+            # 4️⃣ Model Prediction
             logger.info(f"\n🤖 Model Prediction:")
             features = self._build_feature_vector(df)
-            logger.debug(f"  Feature vector shape: {features.shape}")
-            logger.debug(f"  Feature vector size: {len(features)}")
             
             # Reshape to (1, 1, 44) for LSTM input
             X = torch.tensor(features, dtype=torch.float32, device=self.device).unsqueeze(0).unsqueeze(0)
-            logger.debug(f"  Input tensor shape: {X.shape}")
             
             model = self.models[symbol]
             with torch.no_grad():
