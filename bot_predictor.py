@@ -1,0 +1,546 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Advanced Bot Predictor with Real-Time Data Fetching & Trading Signal Generation
+
+Features:
+1. Real-time data fetching from Binance
+2. Multi-timeframe technical analysis
+3. Support/Resistance identification
+4. Trading signal generation with entry/exit points
+5. Risk management (stop-loss, take-profit)
+6. Confidence scoring
+"""
+
+import torch
+import numpy as np
+import pandas as pd
+import logging
+from pathlib import Path
+from typing import Dict, Optional, Tuple, List
+import json
+import warnings
+import ccxt
+from datetime import datetime, timedelta
+import asyncio
+
+warnings.filterwarnings('ignore')
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+class DataFetcher:
+    """Real-time data fetching from Binance"""
+    
+    def __init__(self):
+        self.exchange = ccxt.binance()
+        self.cache = {}  # Cache to avoid excessive API calls
+        self.cache_time = {}  # Cache timestamp
+        self.cache_duration = 60  # Cache for 60 seconds
+    
+    def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> Optional[pd.DataFrame]:
+        """
+        Fetch OHLCV data from Binance
+        
+        Args:
+            symbol: Trading pair (e.g., 'BTC/USDT')
+            timeframe: Candle timeframe (1m, 5m, 1h, 4h, 1d)
+            limit: Number of candles to fetch
+        
+        Returns:
+            DataFrame with OHLCV data
+        """
+        try:
+            # Check cache
+            cache_key = f"{symbol}_{timeframe}"
+            if cache_key in self.cache:
+                time_diff = datetime.now() - self.cache_time[cache_key]
+                if time_diff.total_seconds() < self.cache_duration:
+                    logger.debug(f"Using cached data for {symbol}")
+                    return self.cache[cache_key]
+            
+            logger.info(f"Fetching {limit} {timeframe} candles for {symbol}...")
+            
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            df = df.astype(float)
+            
+            # Cache the data
+            self.cache[cache_key] = df
+            self.cache_time[cache_key] = datetime.now()
+            
+            logger.info(f"✓ Fetched {len(df)} candles for {symbol}")
+            return df
+        
+        except Exception as e:
+            logger.error(f"✗ Failed to fetch {symbol}: {e}")
+            return None
+    
+    def get_latest_price(self, symbol: str) -> Optional[float]:
+        """Get latest price for a symbol"""
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            return float(ticker['last'])
+        except Exception as e:
+            logger.error(f"Failed to fetch latest price for {symbol}: {e}")
+            return None
+
+
+class TechnicalAnalyzer:
+    """Technical analysis for trading signals"""
+    
+    @staticmethod
+    def calculate_support_resistance(df: pd.DataFrame, window: int = 20) -> Tuple[float, float]:
+        """
+        計算支撐位和阻力位
+        
+        Args:
+            df: OHLCV DataFrame
+            window: Lookback period
+        
+        Returns:
+            (support_level, resistance_level)
+        """
+        try:
+            recent = df.tail(window)
+            
+            # 支撐位 = 最低點
+            support = recent['low'].min()
+            
+            # 阻力位 = 最高點
+            resistance = recent['high'].max()
+            
+            return float(support), float(resistance)
+        except Exception as e:
+            logger.error(f"Error calculating support/resistance: {e}")
+            return 0, float('inf')
+    
+    @staticmethod
+    def calculate_moving_averages(df: pd.DataFrame) -> Dict:
+        """
+        計算移動平均線
+        """
+        try:
+            return {
+                'sma20': float(df['close'].rolling(20).mean().iloc[-1]),
+                'sma50': float(df['close'].rolling(50).mean().iloc[-1]),
+                'ema12': float(df['close'].ewm(span=12).mean().iloc[-1]),
+                'ema26': float(df['close'].ewm(span=26).mean().iloc[-1]),
+            }
+        except Exception as e:
+            logger.error(f"Error calculating moving averages: {e}")
+            return {}
+    
+    @staticmethod
+    def calculate_rsi(df: pd.DataFrame, period: int = 14) -> float:
+        """
+        計算相對強弱指標 (RSI)
+        
+        RSI 解釋:
+        - RSI < 30: 超賣 (Oversold) - 可能反彈
+        - RSI > 70: 超買 (Overbought) - 可能回調
+        - 30-70: 中性區間
+        """
+        try:
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+            rs = gain / (loss + 1e-8)
+            rsi = 100 - (100 / (1 + rs))
+            return float(rsi.iloc[-1])
+        except Exception as e:
+            logger.error(f"Error calculating RSI: {e}")
+            return 50
+    
+    @staticmethod
+    def calculate_macd(df: pd.DataFrame) -> Tuple[float, float, float]:
+        """
+        計算 MACD (Moving Average Convergence Divergence)
+        
+        Returns:
+            (macd, signal, histogram)
+        """
+        try:
+            exp1 = df['close'].ewm(span=12).mean()
+            exp2 = df['close'].ewm(span=26).mean()
+            macd = exp1 - exp2
+            signal = macd.ewm(span=9).mean()
+            histogram = macd - signal
+            
+            return float(macd.iloc[-1]), float(signal.iloc[-1]), float(histogram.iloc[-1])
+        except Exception as e:
+            logger.error(f"Error calculating MACD: {e}")
+            return 0, 0, 0
+    
+    @staticmethod
+    def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+        """
+        計算平均真實波幅 (Average True Range)
+        用於確定止損距離
+        """
+        try:
+            high_low = df['high'] - df['low']
+            high_close = np.abs(df['high'] - df['close'].shift())
+            low_close = np.abs(df['low'] - df['close'].shift())
+            
+            tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            atr = tr.rolling(period).mean()
+            
+            return float(atr.iloc[-1])
+        except Exception as e:
+            logger.error(f"Error calculating ATR: {e}")
+            return 0
+    
+    @staticmethod
+    def identify_trend(df: pd.DataFrame) -> str:
+        """
+        識別趨勢方向
+        
+        Returns:
+            'UPTREND', 'DOWNTREND', or 'SIDEWAYS'
+        """
+        try:
+            sma20 = df['close'].rolling(20).mean()
+            sma50 = df['close'].rolling(50).mean()
+            
+            current_price = df['close'].iloc[-1]
+            
+            if current_price > sma20.iloc[-1] > sma50.iloc[-1]:
+                return 'UPTREND'
+            elif current_price < sma20.iloc[-1] < sma50.iloc[-1]:
+                return 'DOWNTREND'
+            else:
+                return 'SIDEWAYS'
+        except Exception as e:
+            logger.error(f"Error identifying trend: {e}")
+            return 'SIDEWAYS'
+
+
+class BotPredictor:
+    """
+    Advanced Bot Predictor with Real-Time Data & Trading Signals
+    """
+    
+    def __init__(self):
+        self.device = torch.device('cpu')
+        self.models = {}  # Dictionary of loaded models
+        self.data_fetcher = DataFetcher()
+        self.analyzer = TechnicalAnalyzer()
+        self.bias_corrections = {}  # Bias corrections for each symbol
+        
+        logger.info("🤖 BotPredictor initialized (CPU mode)")
+        
+        # Load all models
+        self._load_all_models()
+        
+        # Load bias corrections
+        self._load_bias_corrections()
+    
+    def _load_all_models(self):
+        """Load all available models from models/saved/"""
+        try:
+            models_dir = Path('models/saved')
+            if not models_dir.exists():
+                logger.warning(f"Models directory not found: {models_dir}")
+                return
+            
+            model_files = list(models_dir.glob('*.pth'))
+            logger.info(f"Found {len(model_files)} model files")
+            
+            for model_file in model_files:
+                try:
+                    # Extract symbol from filename (e.g., BTC_model_v8.pth -> BTC)
+                    symbol = model_file.stem.split('_')[0].upper()
+                    
+                    logger.info(f"Loading model for {symbol}...")
+                    
+                    model = torch.load(model_file, map_location=self.device)
+                    model.eval()  # Inference mode
+                    
+                    self.models[symbol] = model
+                    logger.info(f"✓ Loaded {symbol} model")
+                
+                except Exception as e:
+                    logger.error(f"✗ Failed to load {model_file}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Failed to load models: {e}")
+    
+    def _load_bias_corrections(self):
+        """Load bias corrections for each model"""
+        try:
+            bias_file = Path('bias_corrections_v8.json')
+            if bias_file.exists():
+                with open(bias_file, 'r') as f:
+                    self.bias_corrections = json.load(f)
+                logger.info(f"✓ Loaded bias corrections for {len(self.bias_corrections)} symbols")
+            else:
+                logger.warning(f"Bias corrections file not found: {bias_file}")
+        
+        except Exception as e:
+            logger.error(f"Failed to load bias corrections: {e}")
+    
+    def _apply_bias_correction(self, symbol: str, prediction: float) -> float:
+        """
+        Apply bias correction to model prediction
+        
+        Args:
+            symbol: Cryptocurrency symbol
+            prediction: Raw model prediction
+        
+        Returns:
+            Corrected prediction
+        """
+        if symbol in self.bias_corrections:
+            bias = self.bias_corrections[symbol].get('bias', 0)
+            scale = self.bias_corrections[symbol].get('scale', 1.0)
+            return prediction * scale + bias
+        return prediction
+    
+    async def predict(self, symbol: str, timeframe: str = '1h') -> Optional[Dict]:
+        """
+        Generate trading signal for a symbol
+        
+        Args:
+            symbol: Cryptocurrency symbol (e.g., 'BTC')
+            timeframe: Candle timeframe (1h, 4h, 1d)
+        
+        Returns:
+            Prediction dictionary with signal details
+        """
+        try:
+            # Check if model exists
+            if symbol not in self.models:
+                logger.warning(f"No model found for {symbol}")
+                return None
+            
+            trading_pair = f"{symbol}/USDT"
+            
+            # 1️⃣ Fetch real-time data from Binance
+            logger.info(f"\n{'='*60}")
+            logger.info(f"🔍 Analyzing {symbol}...")
+            logger.info(f"{'='*60}")
+            
+            df = self.data_fetcher.fetch_ohlcv(trading_pair, timeframe, limit=100)
+            if df is None or df.empty:
+                logger.error(f"Failed to fetch data for {symbol}")
+                return None
+            
+            # 2️⃣ Get current price
+            current_price = df['close'].iloc[-1]
+            logger.info(f"Current Price: ${current_price:.2f}")
+            
+            # 3️⃣ Technical Analysis
+            logger.info(f"\n📊 Technical Analysis:")
+            
+            # Support & Resistance
+            support, resistance = self.analyzer.calculate_support_resistance(df)
+            logger.info(f"  Support: ${support:.2f}")
+            logger.info(f"  Resistance: ${resistance:.2f}")
+            
+            # Trend
+            trend = self.analyzer.identify_trend(df)
+            logger.info(f"  Trend: {trend}")
+            
+            # Moving Averages
+            mas = self.analyzer.calculate_moving_averages(df)
+            logger.info(f"  SMA20: ${mas.get('sma20', 0):.2f}")
+            logger.info(f"  SMA50: ${mas.get('sma50', 0):.2f}")
+            
+            # Indicators
+            rsi = self.analyzer.calculate_rsi(df)
+            macd, signal, histogram = self.analyzer.calculate_macd(df)
+            atr = self.analyzer.calculate_atr(df)
+            
+            logger.info(f"\n📈 Indicators:")
+            logger.info(f"  RSI(14): {rsi:.2f} {'(Overbought)' if rsi > 70 else '(Oversold)' if rsi < 30 else '(Neutral)'}")
+            logger.info(f"  MACD: {macd:.6f}")
+            logger.info(f"  Signal: {signal:.6f}")
+            logger.info(f"  ATR(14): ${atr:.2f}")
+            
+            # 4️⃣ Model Prediction
+            logger.info(f"\n🤖 Model Prediction:")
+            
+            # Prepare input (last 60 candles)
+            recent_prices = df['close'].tail(60).values
+            X = torch.tensor(recent_prices, dtype=torch.float32, device=self.device).unsqueeze(0).unsqueeze(1)
+            
+            model = self.models[symbol]
+            with torch.no_grad():
+                try:
+                    predicted_price = model(X).item()
+                except:
+                    # If model expects different input shape
+                    X_flat = torch.tensor(recent_prices, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    predicted_price = model(X_flat).item()
+            
+            # Apply bias correction
+            corrected_price = self._apply_bias_correction(symbol, predicted_price)
+            
+            logger.info(f"  Raw Prediction: ${predicted_price:.2f}")
+            logger.info(f"  Corrected Prediction: ${corrected_price:.2f}")
+            
+            # 5️⃣ Calculate Price Movement
+            price_change = ((corrected_price - current_price) / current_price) * 100
+            direction = "📈 UP" if price_change > 0 else "📉 DOWN"
+            logger.info(f"  Expected Change: {price_change:+.2f}% {direction}")
+            
+            # 6️⃣ Identify High/Low Points
+            logger.info(f"\n🎯 Trading Strategy:")
+            
+            if trend == 'UPTREND':
+                # In uptrend: Look for dips to buy
+                if current_price < support:
+                    entry_point = support  # Buy at support
+                    high_point = resistance  # Target resistance
+                    low_point = support * 0.98  # Stop-loss below support
+                    signal_type = "BUY_STRONG"
+                    recommendation = "STRONG BUY at support"
+                elif current_price < mas['sma20']:
+                    entry_point = current_price * 0.99  # Slight dip
+                    high_point = resistance
+                    low_point = support
+                    signal_type = "BUY"
+                    recommendation = "BUY near SMA20"
+                else:
+                    entry_point = current_price
+                    high_point = resistance
+                    low_point = support
+                    signal_type = "HOLD"
+                    recommendation = "HOLD in uptrend"
+            
+            elif trend == 'DOWNTREND':
+                # In downtrend: Look for bounces to sell
+                if current_price > resistance:
+                    entry_point = resistance  # Short at resistance
+                    low_point = support  # Target support
+                    high_point = resistance * 1.02  # Stop-loss above resistance
+                    signal_type = "SELL_STRONG"
+                    recommendation = "STRONG SELL at resistance"
+                elif current_price > mas['sma20']:
+                    entry_point = current_price * 1.01  # Slight bounce
+                    low_point = support
+                    high_point = resistance
+                    signal_type = "SELL"
+                    recommendation = "SELL near SMA20"
+                else:
+                    entry_point = current_price
+                    low_point = support
+                    high_point = resistance
+                    signal_type = "HOLD"
+                    recommendation = "HOLD in downtrend"
+            
+            else:  # SIDEWAYS
+                # In sideways market: Range trading
+                entry_point = (support + resistance) / 2
+                high_point = resistance
+                low_point = support
+                signal_type = "RANGE_TRADE"
+                recommendation = "RANGE TRADE between support and resistance"
+            
+            # 7️⃣ Calculate Confidence
+            # Confidence based on multiple factors
+            confidence_factors = []
+            
+            # Trend confirmation
+            if trend == 'UPTREND' and price_change > 0:
+                confidence_factors.append(0.8)
+            elif trend == 'DOWNTREND' and price_change < 0:
+                confidence_factors.append(0.8)
+            else:
+                confidence_factors.append(0.5)
+            
+            # RSI extreme
+            if rsi < 30 and trend == 'UPTREND':
+                confidence_factors.append(0.8)
+            elif rsi > 70 and trend == 'DOWNTREND':
+                confidence_factors.append(0.8)
+            else:
+                confidence_factors.append(0.5)
+            
+            # MACD confirmation
+            if histogram > 0 and trend == 'UPTREND':
+                confidence_factors.append(0.8)
+            elif histogram < 0 and trend == 'DOWNTREND':
+                confidence_factors.append(0.8)
+            else:
+                confidence_factors.append(0.5)
+            
+            confidence = np.mean(confidence_factors)
+            
+            logger.info(f"  Entry: ${entry_point:.2f}")
+            logger.info(f"  High Target: ${high_point:.2f}")
+            logger.info(f"  Low Target: ${low_point:.2f}")
+            logger.info(f"  Stop Loss: ${low_point * 0.98:.2f}")
+            logger.info(f"  Take Profit: ${high_point * 1.02:.2f}")
+            logger.info(f"  Confidence: {confidence*100:.1f}%")
+            logger.info(f"  Recommendation: {recommendation}")
+            
+            # 8️⃣ Build result
+            result = {
+                'symbol': symbol,
+                'current_price': float(current_price),
+                'predicted_price': float(corrected_price),
+                'price_change_percent': float(price_change),
+                'trend': trend,
+                'signal_type': signal_type,
+                'recommendation': recommendation,
+                'entry_point': float(entry_point),
+                'high_target': float(high_point),
+                'low_target': float(low_point),
+                'stop_loss': float(low_point * 0.98),
+                'take_profit': float(high_point * 1.02),
+                'support': float(support),
+                'resistance': float(resistance),
+                'rsi': float(rsi),
+                'macd': float(macd),
+                'atr': float(atr),
+                'confidence': float(confidence),
+                'timestamp': datetime.now().isoformat(),
+            }
+            
+            logger.info(f"{'='*60}\n")
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"✗ Prediction failed for {symbol}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+
+
+# For backward compatibility
+class Predictor(BotPredictor):
+    """Legacy name for BotPredictor"""
+    pass
+
+
+if __name__ == '__main__':
+    import asyncio
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Test the predictor
+    async def test():
+        predictor = BotPredictor()
+        
+        # Test symbols
+        test_symbols = ['BTC', 'ETH', 'SOL']
+        
+        for symbol in test_symbols:
+            result = await predictor.predict(symbol, '1h')
+            if result:
+                print(f"\n✓ {symbol}: {result['recommendation']}")
+    
+    asyncio.run(test())
