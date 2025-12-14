@@ -68,31 +68,34 @@ class ModelDetector:
             logger.warning(f"⚠️  No model files found in {models_dir}")
             return []
         
-        logger.info(f"Found {len(model_files)} model files:")
+        logger.info(f"\n🔍 Found {len(model_files)} model files:")
         
         for model_file in model_files:
             filename = model_file.stem  # 不含副檔名
             
             # 嘗試從檔名中提取幣種
-            # 支援的格式: BTC_model_v8, BTC_model, btc_model_v8 等
-            match = re.match(r'^([A-Za-z]+)(?:_model)?(?:_v\d+)?$', filename)
+            # 支援的格式: BTC_model_v8, BTC_model, btc_model_v8, BTC_v8 等
+            # 第1步: 嘗試正一的格式
+            match = re.match(r'^([A-Za-z]+)', filename)
             
             if match:
                 symbol = match.group(1).upper()
-                symbols.add(symbol)
-                logger.info(f"  ✓ {filename} -> {symbol}")
-            else:
-                # 如果不符合預期格式，嘗試只提取字母部分
-                letters_only = re.match(r'^([A-Za-z]+)', filename)
-                if letters_only:
-                    symbol = letters_only.group(1).upper()
+                
+                # 第2步: 檢查是否是有效的幣種
+                # 也接受整數作为幣種（不是BTC但是2345）
+                if len(symbol) <= 6 and not symbol.isdigit():
                     symbols.add(symbol)
-                    logger.info(f"  ✓ {filename} -> {symbol} (extracted)")
+                    logger.info(f"  ✓ {filename} -> {symbol}")
                 else:
-                    logger.warning(f"  ⚠️  Could not extract symbol from {filename}")
+                    logger.warning(f"  ⚠️  Invalid symbol extracted from {filename}: {symbol}")
+            else:
+                logger.warning(f"  ⚠️  Could not extract symbol from {filename}")
         
         sorted_symbols = sorted(list(symbols))
         logger.info(f"✓ Detected {len(sorted_symbols)} unique symbols: {', '.join(sorted_symbols)}")
+        
+        if len(sorted_symbols) == 0:
+            logger.warning("⚠️  No valid symbols detected. Make sure model files are named like 'BTC_v8.pth'")
         
         return sorted_symbols
 
@@ -203,7 +206,7 @@ class Config:
         
         # Optional HuggingFace config
         hf_token = os.getenv('HUGGINGFACE_TOKEN')
-        hf_repo_id = os.getenv('HUGGINGFACE_REPO_ID', 'caizongxun/crypto-price-predictor-v8')
+        hf_repo_id = os.getenv('HUGGINGFACE_REPO_ID', 'zongowo111/crypto_model')
         
         # Bot config
         prediction_interval = int(os.getenv('PREDICTION_INTERVAL', '3600'))
@@ -216,20 +219,21 @@ class Config:
         manual_symbols = os.getenv('CRYPTO_SYMBOLS')
         if manual_symbols and manual_symbols.strip() and manual_symbols != 'BTC,ETH,SOL,BNB,XRP':
             crypto_symbols = [s.strip().upper() for s in manual_symbols.split(',')]
-            logger.info(f"✓ Using manually configured symbols: {', '.join(crypto_symbols)}")
-        elif auto_detected_symbols:
+            logger.info(f"✓ Using manually configured symbols ({len(crypto_symbols)}): {', '.join(crypto_symbols)}")
+        elif auto_detected_symbols and len(auto_detected_symbols) > 0:
             crypto_symbols = auto_detected_symbols
-            logger.info(f"✓ Using auto-detected symbols: {', '.join(crypto_symbols)}")
+            logger.info(f"✓ Using auto-detected symbols ({len(crypto_symbols)}): {', '.join(crypto_symbols)}")
         else:
             # 預設值 (如果沒有自動偵測到)
+            logger.warning("⚠️  No models found, using default symbols")
             crypto_symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP']
-            logger.warning(f"⚠️  No models found, using default symbols: {', '.join(crypto_symbols)}")
+            logger.info(f"🚧 Using {len(crypto_symbols)} default symbols: {', '.join(crypto_symbols)}")
         
         logger.info(f"\n✓ Configuration loaded successfully")
         logger.info(f"  Discord Channel: {channel_id}")
         logger.info(f"  HuggingFace Repo: {hf_repo_id}")
-        logger.info(f"  Prediction Interval: {prediction_interval}s")
-        logger.info(f"  Crypto Symbols ({len(crypto_symbols)}): {', '.join(crypto_symbols)}")
+        logger.info(f"  Prediction Interval: {prediction_interval}s ({prediction_interval//3600}h)")
+        logger.info(f"  Crypto Symbols ({len(crypto_symbols)}): {', '.join(sorted(crypto_symbols))}")
         
         return {
             'discord_token': discord_token,
@@ -255,12 +259,13 @@ class ModelManager:
         Initialize model manager and download models
         """
         try:
-            logger.info("Initializing model manager...")
+            logger.info("\n🚀 Initializing model manager...")
             
             # Check if models are already downloaded
             models_dir = Path('models/saved')
             if models_dir.exists() and len(list(models_dir.glob('*.pth'))) > 0:
-                logger.info(f"✓ Found {len(list(models_dir.glob('*.pth')))} models locally")
+                model_count = len(list(models_dir.glob('*.pth')))
+                logger.info(f"✓ Found {model_count} models locally")
             else:
                 logger.info("Downloading models from HuggingFace...")
                 await self._download_models()
@@ -298,7 +303,7 @@ class ModelManager:
             snapshot_download(
                 repo_id=self.hf_repo_id,
                 repo_type="model",
-                allow_patterns=["models/*.pth"],
+                allow_patterns=["models/**/*.pth"],
                 local_dir=".",
                 token=self.hf_token
             )
@@ -365,7 +370,7 @@ class CryptoPredictorBot(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         """Called when bot is ready"""
-        logger.info(f"Bot logged in as {self.bot.user}")
+        logger.info(f"\n🤖 Bot logged in as {self.bot.user}")
         
         # Get channel
         self.channel = self.bot.get_channel(self.config['channel_id'])
@@ -396,10 +401,12 @@ class CryptoPredictorBot(commands.Cog):
             
             logger.info(f"\n{'='*80}")
             logger.info(f"🔄 Starting prediction cycle for {len(self.config['crypto_symbols'])} symbols...")
+            logger.info(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
             logger.info(f"{'='*80}")
             
             predictions = {}
-            for symbol in self.config['crypto_symbols']:
+            for i, symbol in enumerate(self.config['crypto_symbols'], 1):
+                logger.info(f"\n[{i}/{len(self.config['crypto_symbols'])}] Processing {symbol}...")
                 prediction = await self.model_manager.predict(symbol)
                 if prediction:
                     predictions[symbol] = prediction
@@ -407,6 +414,7 @@ class CryptoPredictorBot(commands.Cog):
             
             if predictions:
                 await self._send_trading_signals(predictions)
+                logger.info(f"\n✓ Prediction cycle completed for {len(predictions)} symbols")
             else:
                 logger.warning("No successful predictions this cycle")
         
@@ -555,7 +563,7 @@ class CryptoPredictorBot(commands.Cog):
         )
         embed.add_field(name="Status", value=status, inline=False)
         embed.add_field(name="Model Manager", value="✅ Initialized" if self.model_manager.bot_predictor else "❌ Not initialized", inline=False)
-        embed.add_field(name=f"Symbols ({len(self.config['crypto_symbols'])})", value=", ".join(self.config['crypto_symbols']), inline=False)
+        embed.add_field(name=f"Symbols ({len(self.config['crypto_symbols'])})", value=", ".join(sorted(self.config['crypto_symbols'])), inline=False)
         embed.add_field(name="Interval", value=f"{self.config['prediction_interval']}s ({self.config['prediction_interval']//3600}h)", inline=False)
         
         await ctx.send(embed=embed)
@@ -608,7 +616,7 @@ async def main():
     try:
         # Load configuration
         logger.info("="*60)
-        logger.info("🤖 Crypto Discord Bot - Starting")
+        logger.info("🤖 Crypto Discord Bot v2.0 - Starting")
         logger.info("="*60)
         
         config = Config.load()
@@ -623,7 +631,7 @@ async def main():
         await bot.add_cog(CryptoPredictorBot(bot, config))
         
         # Start bot
-        logger.info(f"Connecting to Discord...")
+        logger.info(f"\n🚀 Connecting to Discord...")
         await bot.start(config['discord_token'])
     
     except Exception as e:
@@ -636,7 +644,7 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("\n😋 Bot stopped by user")
     except Exception as e:
         logger.error(f"✗ Fatal error: {e}")
         sys.exit(1)
