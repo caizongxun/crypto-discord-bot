@@ -4,8 +4,8 @@
 Crypto Discord Bot
 
 Downloads models from HuggingFace and sends crypto price predictions to Discord
-Automatically detects all available models in models/saved/ directory
-Fetches real-time data from Binance and generates trading signals
+Automatically detects all available models in models/ directory
+Fetches real-time data from multiple exchanges and generates trading signals
 
 Usage:
   python bot.py
@@ -51,10 +51,10 @@ class ModelDetector:
     @staticmethod
     def detect_symbols_from_models():
         """
-        從 models/saved/ 目錄自動偵測所有可用模型
+        從 models/ 目錄自動偵測所有可用模型
         提取模型檔名中的幣種 (例如: BTC_model_v8.pth -> BTC)
         """
-        models_dir = Path('models/saved')
+        models_dir = Path('models')  # 改成 models（不是 models/saved）
         symbols = set()
         
         if not models_dir.exists():
@@ -95,7 +95,7 @@ class ModelDetector:
         logger.info(f"✓ Detected {len(sorted_symbols)} unique symbols: {', '.join(sorted_symbols)}")
         
         if len(sorted_symbols) == 0:
-            logger.warning("⚠️  No valid symbols detected. Make sure model files are named like 'BTC_v8.pth'")
+            logger.warning("⚠️  No valid symbols detected. Make sure model files are named like 'BTC_model_v8.pth'")
         
         return sorted_symbols
 
@@ -256,19 +256,18 @@ class ModelManager:
     
     async def initialize(self):
         """
-        Initialize model manager and download models
+        Initialize model manager and load models
         """
         try:
             logger.info("\n🚀 Initializing model manager...")
             
-            # Check if models are already downloaded
-            models_dir = Path('models/saved')
+            # Check if models exist
+            models_dir = Path('models')
             if models_dir.exists() and len(list(models_dir.glob('*.pth'))) > 0:
                 model_count = len(list(models_dir.glob('*.pth')))
                 logger.info(f"✓ Found {model_count} models locally")
             else:
-                logger.info("Downloading models from HuggingFace...")
-                await self._download_models()
+                logger.warning(f"⚠️  No models found in {models_dir}")
             
             # Import and initialize predictor
             logger.info("Loading bot predictor...")
@@ -290,29 +289,6 @@ class ModelManager:
             logger.error(f"✗ Failed to initialize model manager: {e}")
             logger.error(traceback.format_exc())
             self.ready = False
-    
-    async def _download_models(self):
-        """
-        Download all models from HuggingFace
-        """
-        try:
-            from huggingface_hub import snapshot_download
-            
-            logger.info(f"Downloading models from {self.hf_repo_id}...")
-            
-            snapshot_download(
-                repo_id=self.hf_repo_id,
-                repo_type="model",
-                allow_patterns=["models/**/*.pth"],
-                local_dir=".",
-                token=self.hf_token
-            )
-            
-            logger.info("✓ Models downloaded successfully")
-        
-        except Exception as e:
-            logger.error(f"✗ Model download failed: {e}")
-            raise
     
     async def _download_bot_predictor(self):
         """
@@ -573,7 +549,7 @@ class CryptoPredictorBot(commands.Cog):
         """
         List all available models
         """
-        models_dir = Path('models/saved')
+        models_dir = Path('models')
         
         if not models_dir.exists():
             await ctx.send("❌ Models directory not found")
