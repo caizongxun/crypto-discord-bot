@@ -386,6 +386,144 @@ class BotPredictor:
             return prediction * scale + bias
         return prediction
     
+    def _build_feature_vector(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Build 44-dimensional feature vector from OHLCV data and technical indicators.
+        
+        This matches the training data feature engineering:
+        - OHLCV features (5)
+        - Price ratios and changes (10)
+        - Moving averages (12: SMA/EMA with different periods)
+        - Momentum indicators (12: RSI, MACD, ATR variations)
+        - Volatility measures (5)
+        
+        Returns:
+            numpy array of shape (44,)
+        """
+        try:
+            features = []
+            
+            # 1. Basic OHLCV (5 features)
+            current = df.iloc[-1]
+            features.extend([
+                float(current['open']),
+                float(current['high']),
+                float(current['low']),
+                float(current['close']),
+                float(current['volume'])
+            ])
+            
+            # 2. Price changes and ratios (10 features)
+            close_prices = df['close'].values
+            for period in [1, 5, 10, 20, 50]:
+                if len(df) >= period:
+                    pct_change = (close_prices[-1] - close_prices[-period]) / close_prices[-period]
+                    features.append(float(pct_change))
+            
+            # 3. Moving averages (12 features)
+            try:
+                features.append(float(df['close'].rolling(5).mean().iloc[-1]))
+                features.append(float(df['close'].rolling(10).mean().iloc[-1]))
+                features.append(float(df['close'].rolling(20).mean().iloc[-1]))
+                features.append(float(df['close'].rolling(50).mean().iloc[-1]))
+                features.append(float(df['close'].ewm(span=5).mean().iloc[-1]))
+                features.append(float(df['close'].ewm(span=12).mean().iloc[-1]))
+                features.append(float(df['close'].ewm(span=26).mean().iloc[-1]))
+                
+                # Volatility from rolling windows
+                features.append(float(df['close'].rolling(20).std().iloc[-1]))
+                features.append(float(df['close'].rolling(50).std().iloc[-1]))
+                
+                # High-Low range
+                features.append(float((df['high'].rolling(20).max() - df['low'].rolling(20).min()).iloc[-1]))
+                features.append(float(df['high'].iloc[-1] - df['low'].iloc[-1]))
+                features.append(float((df['close'] - df['open']).abs().mean()))
+            except:
+                features.extend([0.0] * 12)
+            
+            # 4. Momentum indicators (12 features)
+            try:
+                # RSI
+                delta = df['close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / (loss + 1e-8)
+                rsi = 100 - (100 / (1 + rs))
+                features.append(float(rsi.iloc[-1]))
+                
+                # MACD
+                exp1 = df['close'].ewm(span=12).mean()
+                exp2 = df['close'].ewm(span=26).mean()
+                macd = exp1 - exp2
+                signal = macd.ewm(span=9).mean()
+                histogram = macd - signal
+                features.append(float(macd.iloc[-1]))
+                features.append(float(signal.iloc[-1]))
+                features.append(float(histogram.iloc[-1]))
+                
+                # ATR
+                high_low = df['high'] - df['low']
+                high_close = np.abs(df['high'] - df['close'].shift())
+                low_close = np.abs(df['low'] - df['close'].shift())
+                tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                atr = tr.rolling(14).mean()
+                features.append(float(atr.iloc[-1]))
+                
+                # Bollinger Bands
+                sma = df['close'].rolling(20).mean()
+                std = df['close'].rolling(20).std()
+                bb_upper = sma + (std * 2)
+                bb_lower = sma - (std * 2)
+                bb_position = (df['close'].iloc[-1] - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1])
+                features.append(float(bb_position))
+                
+                # Stochastic
+                lowest_low = df['low'].rolling(14).min()
+                highest_high = df['high'].rolling(14).max()
+                k_percent = 100 * ((df['close'].iloc[-1] - lowest_low.iloc[-1]) / (highest_high.iloc[-1] - lowest_low.iloc[-1]))
+                features.append(float(k_percent))
+                
+                # Volume indicators
+                volume_sma = df['volume'].rolling(20).mean()
+                volume_ratio = df['volume'].iloc[-1] / (volume_sma.iloc[-1] + 1e-8)
+                features.append(float(volume_ratio))
+                
+                # OBV
+                obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
+                features.append(float(obv.iloc[-1]))
+            except:
+                features.extend([0.0] * 12)
+            
+            # 5. Volatility measures (5 features)
+            try:
+                # Daily returns volatility
+                returns = df['close'].pct_change()
+                features.append(float(returns.std()))
+                features.append(float(returns.mean()))
+                
+                # Range metrics
+                features.append(float((df['high'] - df['low']).mean()))
+                features.append(float((df['high'] - df['low']).std()))
+                
+                # Price position in range
+                min_price = df['close'].rolling(50).min().iloc[-1]
+                max_price = df['close'].rolling(50).max().iloc[-1]
+                price_position = (df['close'].iloc[-1] - min_price) / (max_price - min_price)
+                features.append(float(price_position))
+            except:
+                features.extend([0.0] * 5)
+            
+            # Ensure we have exactly 44 features
+            features = features[:44]
+            while len(features) < 44:
+                features.append(0.0)
+            
+            return np.array(features, dtype=np.float32)
+        
+        except Exception as e:
+            logger.error(f"Error building feature vector: {e}")
+            return np.zeros(44, dtype=np.float32)
+    
     async def predict(self, symbol: str, timeframe: str = '1h') -> Optional[Dict]:
         """
         Generate trading signal for a symbol
@@ -434,10 +572,15 @@ class BotPredictor:
             logger.info(f"  MACD: {macd:.6f}")
             logger.info(f"  ATR(14): ${atr:.2f}")
             
-            # 4️⃣ Model Prediction
+            # 4️⃣ Model Prediction - BUILD PROPER 44-DIMENSIONAL FEATURE VECTOR
             logger.info(f"\n🤖 Model Prediction:")
-            recent_prices = df['close'].tail(60).values
-            X = torch.tensor(recent_prices, dtype=torch.float32, device=self.device).unsqueeze(0).unsqueeze(1)
+            features = self._build_feature_vector(df)
+            logger.debug(f"  Feature vector shape: {features.shape}")
+            logger.debug(f"  Feature vector size: {len(features)}")
+            
+            # Reshape to (1, 1, 44) for LSTM input
+            X = torch.tensor(features, dtype=torch.float32, device=self.device).unsqueeze(0).unsqueeze(0)
+            logger.debug(f"  Input tensor shape: {X.shape}")
             
             model = self.models[symbol]
             with torch.no_grad():
