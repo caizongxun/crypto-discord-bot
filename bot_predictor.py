@@ -51,17 +51,19 @@ class CryptoLSTMModel(torch.nn.Module):
         )
         
         # Regressor: bidirectional LSTM outputs 2*hidden_size = 512
-        # Note: using indices 0, 3, 5 to match training architecture
-        lstm_output_size = hidden_size * 2
-        self.regressor = torch.nn.ModuleDict({
-            '0': torch.nn.Linear(lstm_output_size, 64),
-            '1': torch.nn.ReLU(),
-            '2': torch.nn.Dropout(0.2),
-            '3': torch.nn.Linear(64, 32),
-            '4': torch.nn.ReLU(),
-            '5': torch.nn.Dropout(0.2),
-            '6': torch.nn.Linear(32, output_size)
-        })
+        # State dict has keys: regressor.0.weight/bias, regressor.3.weight/bias, regressor.5.weight/bias
+        lstm_output_size = hidden_size * 2  # 512
+        
+        # Build regressor using Sequential (names will be 0, 1, 2, ...)
+        # But only layers 0, 3, 5 have learnable parameters
+        self.regressor = torch.nn.Sequential(
+            torch.nn.Linear(lstm_output_size, 64),   # regressor.0: 512 -> 64
+            torch.nn.ReLU(),                          # regressor.1: activation
+            torch.nn.Dropout(0.2),                    # regressor.2: dropout
+            torch.nn.Linear(64, 32),                  # regressor.3: 64 -> 32
+            torch.nn.ReLU(),                          # regressor.4: activation
+            torch.nn.Linear(32, output_size)          # regressor.5: 32 -> 1 (output)
+        )
     
     def forward(self, x):
         # x shape: (batch, seq_len, input_size) or (batch, input_size)
@@ -70,17 +72,9 @@ class CryptoLSTMModel(torch.nn.Module):
         
         lstm_out, _ = self.lstm(x)
         last_output = lstm_out[:, -1, :]  # Take last time step
+        output = self.regressor(last_output)
         
-        # Pass through regressor layers
-        out = self.regressor['0'](last_output)
-        out = self.regressor['1'](out)
-        out = self.regressor['2'](out)
-        out = self.regressor['3'](out)
-        out = self.regressor['4'](out)
-        out = self.regressor['5'](out)
-        out = self.regressor['6'](out)
-        
-        return out
+        return output
 
 
 class DataFetcher:
