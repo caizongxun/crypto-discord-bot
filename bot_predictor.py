@@ -32,6 +32,36 @@ warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
 
 
+class SimpleModel(torch.nn.Module):
+    """Simple LSTM model for loading state_dict"""
+    
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, output_size=1):
+        super(SimpleModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        self.lstm = torch.nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=0.2
+        )
+        
+        self.fc = torch.nn.Sequential(
+            torch.nn.Linear(hidden_size, 32),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(32, output_size)
+        )
+    
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        last_output = lstm_out[:, -1, :]
+        output = self.fc(last_output)
+        return output
+
+
 class DataFetcher:
     """Real-time data fetching from multiple exchanges with fallback"""
     
@@ -276,7 +306,7 @@ class BotPredictor:
     def _load_all_models(self):
         """Load all available models from models/"""
         try:
-            models_dir = Path('models')  # 改成 models
+            models_dir = Path('models')
             if not models_dir.exists():
                 logger.warning(f"Models directory not found: {models_dir}")
                 return
@@ -294,10 +324,22 @@ class BotPredictor:
                         symbol = match.group(1).upper()
                         logger.info(f"Loading model for {symbol} from {model_file.name}...")
                         
-                        model = torch.load(model_file, map_location=self.device)
-                        model.eval()
-                        self.models[symbol] = model
-                        logger.info(f"✓ Loaded {symbol} model")
+                        # 嘗試載入為 state_dict
+                        checkpoint = torch.load(model_file, map_location=self.device)
+                        
+                        # 檢查是否為 state_dict
+                        if isinstance(checkpoint, dict):
+                            # 這是 state_dict，需要建立模型並載入
+                            model = SimpleModel(input_size=1, hidden_size=64, num_layers=2, output_size=1)
+                            model.load_state_dict(checkpoint)
+                            model.eval()
+                            self.models[symbol] = model
+                            logger.info(f"✓ Loaded {symbol} model from state_dict")
+                        else:
+                            # 這是完整的模型物件
+                            checkpoint.eval()
+                            self.models[symbol] = checkpoint
+                            logger.info(f"✓ Loaded {symbol} model")
                     else:
                         logger.warning(f"Could not extract symbol from {model_file.name}")
                 
@@ -400,7 +442,7 @@ class BotPredictor:
             logger.info(f"  Expected Change: {price_change:+.2f}% {direction}")
             
             # 6️⃣ Identify High/Low Points and Generate Signal
-            logger.info(f"\n🏎️ Trading Strategy:")
+            logger.info(f"\n🏄 Trading Strategy:")
             
             if trend == 'UPTREND':
                 if current_price < support:
