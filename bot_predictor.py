@@ -51,16 +51,17 @@ class CryptoLSTMModel(torch.nn.Module):
         )
         
         # Regressor: bidirectional LSTM outputs 2*hidden_size = 512
+        # Note: using indices 0, 3, 5 to match training architecture
         lstm_output_size = hidden_size * 2
-        self.regressor = torch.nn.Sequential(
-            torch.nn.Linear(lstm_output_size, 64),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(0.2),
-            torch.nn.Linear(64, 32),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(0.2),
-            torch.nn.Linear(32, output_size)
-        )
+        self.regressor = torch.nn.ModuleDict({
+            '0': torch.nn.Linear(lstm_output_size, 64),
+            '1': torch.nn.ReLU(),
+            '2': torch.nn.Dropout(0.2),
+            '3': torch.nn.Linear(64, 32),
+            '4': torch.nn.ReLU(),
+            '5': torch.nn.Dropout(0.2),
+            '6': torch.nn.Linear(32, output_size)
+        })
     
     def forward(self, x):
         # x shape: (batch, seq_len, input_size) or (batch, input_size)
@@ -69,8 +70,17 @@ class CryptoLSTMModel(torch.nn.Module):
         
         lstm_out, _ = self.lstm(x)
         last_output = lstm_out[:, -1, :]  # Take last time step
-        output = self.regressor(last_output)
-        return output
+        
+        # Pass through regressor layers
+        out = self.regressor['0'](last_output)
+        out = self.regressor['1'](out)
+        out = self.regressor['2'](out)
+        out = self.regressor['3'](out)
+        out = self.regressor['4'](out)
+        out = self.regressor['5'](out)
+        out = self.regressor['6'](out)
+        
+        return out
 
 
 class DataFetcher:
