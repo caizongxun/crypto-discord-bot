@@ -39,6 +39,7 @@ class CryptoLSTMModel(torch.nn.Module):
         super(CryptoLSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.input_size = input_size
         
         # Bidirectional LSTM with hidden_size=64
         # Output will be 64*2=128 after bidirectional concatenation
@@ -319,6 +320,38 @@ class BotPredictor:
         # Load bias corrections
         self._load_bias_corrections()
     
+    def _detect_model_architecture(self, checkpoint: Dict) -> Tuple[int, int]:
+        """
+        Detect the correct input_size and hidden_size from checkpoint weights
+        
+        Args:
+            checkpoint: Model state dict
+        
+        Returns:
+            Tuple of (input_size, hidden_size)
+        """
+        try:
+            # Check lstm.weight_ih_l0 shape: (hidden_size*4, input_size) for LSTM
+            # or (hidden_size*4*2, input_size) for bidirectional
+            if 'lstm.weight_ih_l0' in checkpoint:
+                weight_shape = checkpoint['lstm.weight_ih_l0'].shape
+                lstm_gates_times_hidden = weight_shape[0]  # First dimension
+                input_size = weight_shape[1]  # Second dimension
+                
+                # For bidirectional LSTM: hidden_size = lstm_gates_times_hidden / (4 * 2)
+                # For regular LSTM: hidden_size = lstm_gates_times_hidden / 4
+                hidden_size_bi = lstm_gates_times_hidden // 8  # bidirectional
+                hidden_size_regular = lstm_gates_times_hidden // 4  # regular
+                
+                # Assume bidirectional (more common in training)
+                return input_size, hidden_size_bi
+            
+            # Default fallback
+            return 44, 64
+        except Exception as e:
+            logger.warning(f"Could not detect architecture: {e}, using defaults")
+            return 44, 64
+    
     def _load_all_models(self):
         """Load all available models from models/"""
         try:
@@ -342,17 +375,26 @@ class BotPredictor:
                         # Load checkpoint
                         checkpoint = torch.load(model_file, map_location=self.device)
                         
-                        # Create model and load state_dict
+                        # Detect architecture from checkpoint
+                        input_size, hidden_size = self._detect_model_architecture(checkpoint)
+                        logger.debug(f"  Detected architecture: input_size={input_size}, hidden_size={hidden_size}")
+                        
+                        # Create model with detected architecture
                         model = CryptoLSTMModel(
-                            input_size=44,
-                            hidden_size=64,
+                            input_size=input_size,
+                            hidden_size=hidden_size,
                             num_layers=2,
                             output_size=1
                         )
-                        model.load_state_dict(checkpoint)
-                        model.eval()
-                        self.models[symbol] = model
-                        logger.info(f"✓ {symbol} loaded successfully")
+                        
+                        try:
+                            model.load_state_dict(checkpoint)
+                            model.eval()
+                            self.models[symbol] = model
+                            logger.info(f"✓ {symbol} loaded successfully")
+                        except RuntimeError as load_error:
+                            logger.warning(f"⚠️  Failed to load {symbol}: {str(load_error)[:150]}")
+                            logger.warning(f"   Skipping incompatible model {symbol}")
                     else:
                         logger.warning(f"Could not extract symbol from {model_file.name}")
                 
@@ -360,6 +402,8 @@ class BotPredictor:
                     logger.error(f"✗ Failed to load {model_file.name}: {str(e)[:200]}")
             
             logger.info(f"✓ Total loaded: {len(self.models)} models")
+            if self.models:
+                logger.info(f"  Available symbols: {', '.join(sorted(self.models.keys()))}")
         
         except Exception as e:
             logger.error(f"Failed to load models directory: {e}")
@@ -679,60 +723,4 @@ class BotPredictor:
             logger.info(f"  Recommendation: {recommendation}")
             
             # 8️⃣ Build result
-            result = {
-                'symbol': symbol,
-                'current_price': float(current_price),
-                'predicted_price': float(corrected_price),
-                'price_change_percent': float(price_change),
-                'trend': trend,
-                'signal_type': signal_type,
-                'recommendation': recommendation,
-                'entry_point': float(entry_point),
-                'high_target': float(high_point),
-                'low_target': float(low_point),
-                'stop_loss': float(low_point * 0.98),
-                'take_profit': float(high_point * 1.02),
-                'support': float(support),
-                'resistance': float(resistance),
-                'rsi': float(rsi),
-                'macd': float(macd),
-                'atr': float(atr),
-                'confidence': float(confidence),
-                'timestamp': datetime.now().isoformat(),
-            }
-            
-            logger.info(f"{'='*60}\n")
-            return result
-        
-        except Exception as e:
-            logger.error(f"✗ Prediction failed for {symbol}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
-
-
-# For backward compatibility
-class Predictor(BotPredictor):
-    """Legacy name for BotPredictor"""
-    pass
-
-
-if __name__ == '__main__':
-    import asyncio
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    # Test the predictor
-    async def test():
-        predictor = BotPredictor()
-        test_symbols = ['BTC', 'ETH', 'SOL']
-        
-        for symbol in test_symbols:
-            result = await predictor.predict(symbol, '1h')
-            if result:
-                print(f"\n✓ {symbol}: {result['recommendation']}")
-    
-    asyncio.run(test())
+            result = {\n                'symbol': symbol,\n                'current_price': float(current_price),\n                'predicted_price': float(corrected_price),\n                'price_change_percent': float(price_change),\n                'trend': trend,\n                'signal_type': signal_type,\n                'recommendation': recommendation,\n                'entry_point': float(entry_point),\n                'high_target': float(high_point),\n                'low_target': float(low_point),\n                'stop_loss': float(low_point * 0.98),\n                'take_profit': float(high_point * 1.02),\n                'support': float(support),\n                'resistance': float(resistance),\n                'rsi': float(rsi),\n                'macd': float(macd),\n                'atr': float(atr),\n                'confidence': float(confidence),\n                'timestamp': datetime.now().isoformat(),\n            }\n            \n            logger.info(f\"{'='*60}\\n\")\n            return result\n        \n        except Exception as e:\n            logger.error(f\"✗ Prediction failed for {symbol}: {e}\")\n            import traceback\n            logger.error(traceback.format_exc())\n            return None\n\n\n# For backward compatibility\nclass Predictor(BotPredictor):\n    \"\"\"Legacy name for BotPredictor\"\"\"\n    pass\n\n\nif __name__ == '__main__':\n    import asyncio\n    \n    logging.basicConfig(\n        level=logging.INFO,\n        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'\n    )\n    \n    # Test the predictor\n    async def test():\n        predictor = BotPredictor()\n        test_symbols = ['BTC', 'ETH', 'SOL']\n        \n        for symbol in test_symbols:\n            result = await predictor.predict(symbol, '1h')\n            if result:\n                print(f\"\\n✓ {symbol}: {result['recommendation']}\")\n    \n    asyncio.run(test())\n", "_requires_user_approval": false}
