@@ -4,6 +4,7 @@
 Crypto Discord Bot
 
 Downloads models from HuggingFace and sends crypto price predictions to Discord
+Automatically detects all available models in models/saved/ directory
 
 Usage:
   python bot.py
@@ -28,6 +29,7 @@ import discord
 from discord.ext import commands, tasks
 from datetime import datetime
 import traceback
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -39,6 +41,58 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+class ModelDetector:
+    """自動偵測和提取模型幣種"""
+    
+    @staticmethod
+    def detect_symbols_from_models():
+        """
+        從 models/saved/ 目錄自動偵測所有可用模型
+        提取模型檔名中的幣種 (例如: BTC_model_v8.pth -> BTC)
+        """
+        models_dir = Path('models/saved')
+        symbols = set()
+        
+        if not models_dir.exists():
+            logger.warning(f"⚠️  Models directory not found: {models_dir}")
+            return []
+        
+        # 掃描所有 .pth 檔案
+        model_files = list(models_dir.glob('*.pth'))
+        
+        if not model_files:
+            logger.warning(f"⚠️  No model files found in {models_dir}")
+            return []
+        
+        logger.info(f"Found {len(model_files)} model files:")
+        
+        for model_file in model_files:
+            filename = model_file.stem  # 不含副檔名
+            
+            # 嘗試從檔名中提取幣種
+            # 支援的格式: BTC_model_v8, BTC_model, btc_model_v8 等
+            match = re.match(r'^([A-Za-z]+)(?:_model)?(?:_v\d+)?$', filename)
+            
+            if match:
+                symbol = match.group(1).upper()
+                symbols.add(symbol)
+                logger.info(f"  ✓ {filename} -> {symbol}")
+            else:
+                # 如果不符合預期格式，嘗試只提取字母部分
+                letters_only = re.match(r'^([A-Za-z]+)', filename)
+                if letters_only:
+                    symbol = letters_only.group(1).upper()
+                    symbols.add(symbol)
+                    logger.info(f"  ✓ {filename} -> {symbol} (extracted)")
+                else:
+                    logger.warning(f"  ⚠️  Could not extract symbol from {filename}")
+        
+        sorted_symbols = sorted(list(symbols))
+        logger.info(f"✓ Detected {len(sorted_symbols)} unique symbols: {', '.join(sorted_symbols)}")
+        
+        return sorted_symbols
 
 
 class Config:
@@ -118,6 +172,7 @@ class Config:
     def load():
         """
         Load configuration from .env
+        自動偵測模型幣種
         """
         env_file = Config.find_env_file()
         if env_file:
@@ -150,14 +205,29 @@ class Config:
         
         # Bot config
         prediction_interval = int(os.getenv('PREDICTION_INTERVAL', '3600'))
-        crypto_symbols = os.getenv('CRYPTO_SYMBOLS', 'BTC,ETH,SOL,BNB,XRP').split(',')
-        crypto_symbols = [s.strip().upper() for s in crypto_symbols]
         
-        logger.info(f"✓ Configuration loaded successfully")
+        # 自動偵測模型幣種
+        logger.info("\n🔍 Auto-detecting available models...")
+        auto_detected_symbols = ModelDetector.detect_symbols_from_models()
+        
+        # 如果有手動配置的幣種，就使用手動配置；否則使用自動偵測
+        manual_symbols = os.getenv('CRYPTO_SYMBOLS')
+        if manual_symbols and manual_symbols != 'BTC,ETH,SOL,BNB,XRP':
+            crypto_symbols = [s.strip().upper() for s in manual_symbols.split(',')]
+            logger.info(f"✓ Using manually configured symbols: {', '.join(crypto_symbols)}")
+        elif auto_detected_symbols:
+            crypto_symbols = auto_detected_symbols
+            logger.info(f"✓ Using auto-detected symbols: {', '.join(crypto_symbols)}")
+        else:
+            # 預設值 (如果沒有自動偵測到)
+            crypto_symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP']
+            logger.warning(f"⚠️  No models found, using default symbols: {', '.join(crypto_symbols)}")
+        
+        logger.info(f"\n✓ Configuration loaded successfully")
         logger.info(f"  Discord Channel: {channel_id}")
         logger.info(f"  HuggingFace Repo: {hf_repo_id}")
         logger.info(f"  Prediction Interval: {prediction_interval}s")
-        logger.info(f"  Crypto Symbols: {', '.join(crypto_symbols)}")
+        logger.info(f"  Crypto Symbols ({len(crypto_symbols)}): {', '.join(crypto_symbols)}")
         
         return {
             'discord_token': discord_token,
@@ -320,7 +390,7 @@ class CryptoPredictorBot(commands.Cog):
             if not self.channel or not self.model_manager.ready:
                 return
             
-            logger.info("Starting prediction cycle...")
+            logger.info(f"Starting prediction cycle for {len(self.config['crypto_symbols'])} symbols...")
             
             predictions = {}
             for symbol in self.config['crypto_symbols']:
@@ -434,7 +504,7 @@ class CryptoPredictorBot(commands.Cog):
     @commands.command(name='status')
     async def status_command(self, ctx):
         """
-        Check bot status
+        Check bot status and available symbols
         """
         status = "✅ Ready" if self.model_manager.ready else "❌ Not Ready"
         
@@ -444,8 +514,48 @@ class CryptoPredictorBot(commands.Cog):
         )
         embed.add_field(name="Status", value=status, inline=False)
         embed.add_field(name="Model Manager", value="✅ Initialized" if self.model_manager.bot_predictor else "❌ Not initialized", inline=False)
-        embed.add_field(name="Symbols", value=", ".join(self.config['crypto_symbols']), inline=False)
-        embed.add_field(name="Interval", value=f"{self.config['prediction_interval']}s", inline=False)
+        embed.add_field(name=f"Symbols ({len(self.config['crypto_symbols'])})", value=", ".join(self.config['crypto_symbols']), inline=False)
+        embed.add_field(name="Interval", value=f"{self.config['prediction_interval']}s ({self.config['prediction_interval']//3600}h)", inline=False)
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name='models')
+    async def models_command(self, ctx):
+        """
+        List all available models
+        """
+        models_dir = Path('models/saved')
+        
+        if not models_dir.exists():
+            await ctx.send("❌ Models directory not found")
+            return
+        
+        model_files = sorted(list(models_dir.glob('*.pth')))
+        
+        if not model_files:
+            await ctx.send("❌ No models found")
+            return
+        
+        embed = discord.Embed(
+            title="📦 Available Models",
+            description=f"Total: {len(model_files)} models",
+            color=discord.Color.blue()
+        )
+        
+        # 分組顯示模型 (每個 embed field 最多 1024 字符)
+        models_text = ""
+        for i, model_file in enumerate(model_files, 1):
+            size_mb = model_file.stat().st_size / (1024 * 1024)
+            line = f"{i}. `{model_file.name}` ({size_mb:.1f} MB)\n"
+            
+            if len(models_text) + len(line) > 1000:
+                embed.add_field(name="\u200b", value=models_text, inline=False)
+                models_text = line
+            else:
+                models_text += line
+        
+        if models_text:
+            embed.add_field(name="\u200b", value=models_text, inline=False)
         
         await ctx.send(embed=embed)
 
@@ -457,7 +567,7 @@ async def main():
     try:
         # Load configuration
         logger.info("="*60)
-        logger.info("Crypto Discord Bot - Starting")
+        logger.info("🤖 Crypto Discord Bot - Starting")
         logger.info("="*60)
         
         config = Config.load()
