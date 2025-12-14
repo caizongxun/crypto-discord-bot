@@ -24,6 +24,7 @@ import warnings
 import ccxt
 from datetime import datetime, timedelta
 import asyncio
+import re
 
 warnings.filterwarnings('ignore')
 
@@ -273,9 +274,9 @@ class BotPredictor:
         self._load_bias_corrections()
     
     def _load_all_models(self):
-        """Load all available models from models/saved/"""
+        """Load all available models from models/"""
         try:
-            models_dir = Path('models/saved')
+            models_dir = Path('models')  # 改成 models
             if not models_dir.exists():
                 logger.warning(f"Models directory not found: {models_dir}")
                 return
@@ -286,13 +287,19 @@ class BotPredictor:
             for model_file in model_files:
                 try:
                     # Extract symbol from filename
-                    symbol = model_file.stem.split('_')[0].upper()
-                    logger.info(f"Loading model for {symbol}...")
-                    
-                    model = torch.load(model_file, map_location=self.device)
-                    model.eval()
-                    self.models[symbol] = model
-                    logger.info(f"✓ Loaded {symbol} model")
+                    # 支援 ADA_model_v8.pth, BTC_v8.pth 等檔名格式
+                    stem = model_file.stem  # e.g., ADA_model_v8
+                    match = re.match(r'^([A-Za-z]+)', stem)
+                    if match:
+                        symbol = match.group(1).upper()
+                        logger.info(f"Loading model for {symbol} from {model_file.name}...")
+                        
+                        model = torch.load(model_file, map_location=self.device)
+                        model.eval()
+                        self.models[symbol] = model
+                        logger.info(f"✓ Loaded {symbol} model")
+                    else:
+                        logger.warning(f"Could not extract symbol from {model_file.name}")
                 
                 except Exception as e:
                     logger.error(f"✗ Failed to load {model_file}: {e}")
