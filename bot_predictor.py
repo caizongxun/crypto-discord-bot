@@ -4,12 +4,13 @@
 Advanced Bot Predictor with Real-Time Data Fetching & Trading Signal Generation
 
 Features:
-1. Real-time data fetching from Binance
-2. Multi-timeframe technical analysis
-3. Support/Resistance identification
-4. Trading signal generation with entry/exit points
-5. Risk management (stop-loss, take-profit)
-6. Confidence scoring
+1. Real-time data fetching from multiple exchanges (Binance, Bybit, OKX)
+2. Fallback exchanges for geo-restrictions
+3. Multi-timeframe technical analysis
+4. Support/Resistance identification
+5. Trading signal generation with entry/exit points
+6. Risk management (stop-loss, take-profit)
+7. Confidence scoring
 """
 
 import torch
@@ -31,17 +32,66 @@ logger = logging.getLogger(__name__)
 
 
 class DataFetcher:
-    """Real-time data fetching from Binance"""
+    """Real-time data fetching from multiple exchanges with fallback"""
     
     def __init__(self):
-        self.exchange = ccxt.binance()
+        # Initialize multiple exchanges
+        self.exchanges = self._init_exchanges()
         self.cache = {}  # Cache to avoid excessive API calls
         self.cache_time = {}  # Cache timestamp
         self.cache_duration = 60  # Cache for 60 seconds
     
+    def _init_exchanges(self) -> Dict:
+        """
+        Initialize multiple exchanges with fallback support
+        """
+        exchanges = {}
+        
+        # Primary: Binance
+        try:
+            exchanges['binance'] = ccxt.binance({
+                'enableRateLimit': True,
+                'rateLimit': 1000,
+            })
+            logger.info("✓ Binance initialized")
+        except Exception as e:
+            logger.warning(f"⚠️  Binance initialization failed: {e}")
+        
+        # Fallback 1: Bybit (no geo-restriction)
+        try:
+            exchanges['bybit'] = ccxt.bybit({
+                'enableRateLimit': True,
+                'rateLimit': 1000,
+            })
+            logger.info("✓ Bybit initialized")
+        except Exception as e:
+            logger.warning(f"⚠️  Bybit initialization failed: {e}")
+        
+        # Fallback 2: OKX (no geo-restriction)
+        try:
+            exchanges['okx'] = ccxt.okx({
+                'enableRateLimit': True,
+                'rateLimit': 1000,
+            })
+            logger.info("✓ OKX initialized")
+        except Exception as e:
+            logger.warning(f"⚠️  OKX initialization failed: {e}")
+        
+        # Fallback 3: Kraken
+        try:
+            exchanges['kraken'] = ccxt.kraken({
+                'enableRateLimit': True,
+                'rateLimit': 3000,
+            })
+            logger.info("✓ Kraken initialized")
+        except Exception as e:
+            logger.warning(f"⚠️  Kraken initialization failed: {e}")
+        
+        return exchanges
+    
     def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> Optional[pd.DataFrame]:
         """
-        Fetch OHLCV data from Binance
+        Fetch OHLCV data from multiple exchanges with fallback
         
         Args:
             symbol: Trading pair (e.g., 'BTC/USDT')
@@ -51,46 +101,63 @@ class DataFetcher:
         Returns:
             DataFrame with OHLCV data
         """
-        try:
-            # Check cache
-            cache_key = f"{symbol}_{timeframe}"
-            if cache_key in self.cache:
-                time_diff = datetime.now() - self.cache_time[cache_key]
-                if time_diff.total_seconds() < self.cache_duration:
-                    logger.debug(f"Using cached data for {symbol}")
-                    return self.cache[cache_key]
-            
-            logger.info(f"Fetching {limit} {timeframe} candles for {symbol}...")
-            
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            
-            df = pd.DataFrame(
-                ohlcv,
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            )
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            df = df.astype(float)
-            
-            # Cache the data
-            self.cache[cache_key] = df
-            self.cache_time[cache_key] = datetime.now()
-            
-            logger.info(f"✓ Fetched {len(df)} candles for {symbol}")
-            return df
+        # Check cache
+        cache_key = f"{symbol}_{timeframe}"
+        if cache_key in self.cache:
+            time_diff = datetime.now() - self.cache_time[cache_key]
+            if time_diff.total_seconds() < self.cache_duration:
+                logger.debug(f"Using cached data for {symbol}")
+                return self.cache[cache_key]
         
-        except Exception as e:
-            logger.error(f"✗ Failed to fetch {symbol}: {e}")
-            return None
+        # Try exchanges in order
+        exchange_order = ['binance', 'bybit', 'okx', 'kraken']
+        
+        for exchange_name in exchange_order:
+            if exchange_name not in self.exchanges:
+                continue
+            
+            try:
+                exchange = self.exchanges[exchange_name]
+                logger.info(f"Fetching {symbol} from {exchange_name}...")
+                
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                
+                df = pd.DataFrame(
+                    ohlcv,
+                    columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+                )
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                df = df.astype(float)
+                
+                # Cache the data
+                self.cache[cache_key] = df
+                self.cache_time[cache_key] = datetime.now()
+                
+                logger.info(f"✓ Fetched {len(df)} candles for {symbol} from {exchange_name}")
+                return df
+            
+            except Exception as e:
+                logger.warning(f"⚠️  {exchange_name} failed for {symbol}: {str(e)[:100]}")
+                continue
+        
+        logger.error(f"✗ Failed to fetch {symbol} from all exchanges")
+        return None
     
     def get_latest_price(self, symbol: str) -> Optional[float]:
         """Get latest price for a symbol"""
-        try:
-            ticker = self.exchange.fetch_ticker(symbol)
-            return float(ticker['last'])
-        except Exception as e:
-            logger.error(f"Failed to fetch latest price for {symbol}: {e}")
-            return None
+        for exchange_name in ['binance', 'bybit', 'okx', 'kraken']:
+            if exchange_name not in self.exchanges:
+                continue
+            
+            try:
+                exchange = self.exchanges[exchange_name]
+                ticker = exchange.fetch_ticker(symbol)
+                return float(ticker['last'])
+            except:
+                continue
+        
+        return None
 
 
 class TechnicalAnalyzer:
@@ -100,23 +167,11 @@ class TechnicalAnalyzer:
     def calculate_support_resistance(df: pd.DataFrame, window: int = 20) -> Tuple[float, float]:
         """
         計算支撐位和阻力位
-        
-        Args:
-            df: OHLCV DataFrame
-            window: Lookback period
-        
-        Returns:
-            (support_level, resistance_level)
         """
         try:
             recent = df.tail(window)
-            
-            # 支撐位 = 最低點
             support = recent['low'].min()
-            
-            # 阻力位 = 最高點
             resistance = recent['high'].max()
-            
             return float(support), float(resistance)
         except Exception as e:
             logger.error(f"Error calculating support/resistance: {e}")
@@ -124,9 +179,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def calculate_moving_averages(df: pd.DataFrame) -> Dict:
-        """
-        計算移動平均線
-        """
+        """計算移動平均線"""
         try:
             return {
                 'sma20': float(df['close'].rolling(20).mean().iloc[-1]),
@@ -140,14 +193,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def calculate_rsi(df: pd.DataFrame, period: int = 14) -> float:
-        """
-        計算相對強弱指標 (RSI)
-        
-        RSI 解釋:
-        - RSI < 30: 超賣 (Oversold) - 可能反彈
-        - RSI > 70: 超買 (Overbought) - 可能回調
-        - 30-70: 中性區間
-        """
+        """計算RSI"""
         try:
             delta = df['close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -161,19 +207,13 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def calculate_macd(df: pd.DataFrame) -> Tuple[float, float, float]:
-        """
-        計算 MACD (Moving Average Convergence Divergence)
-        
-        Returns:
-            (macd, signal, histogram)
-        """
+        """計算MACD"""
         try:
             exp1 = df['close'].ewm(span=12).mean()
             exp2 = df['close'].ewm(span=26).mean()
             macd = exp1 - exp2
             signal = macd.ewm(span=9).mean()
             histogram = macd - signal
-            
             return float(macd.iloc[-1]), float(signal.iloc[-1]), float(histogram.iloc[-1])
         except Exception as e:
             logger.error(f"Error calculating MACD: {e}")
@@ -181,18 +221,13 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
-        """
-        計算平均真實波幅 (Average True Range)
-        用於確定止損距離
-        """
+        """計算ATR"""
         try:
             high_low = df['high'] - df['low']
             high_close = np.abs(df['high'] - df['close'].shift())
             low_close = np.abs(df['low'] - df['close'].shift())
-            
             tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
             atr = tr.rolling(period).mean()
-            
             return float(atr.iloc[-1])
         except Exception as e:
             logger.error(f"Error calculating ATR: {e}")
@@ -200,16 +235,10 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def identify_trend(df: pd.DataFrame) -> str:
-        """
-        識別趨勢方向
-        
-        Returns:
-            'UPTREND', 'DOWNTREND', or 'SIDEWAYS'
-        """
+        """識別趨勢方向"""
         try:
             sma20 = df['close'].rolling(20).mean()
             sma50 = df['close'].rolling(50).mean()
-            
             current_price = df['close'].iloc[-1]
             
             if current_price > sma20.iloc[-1] > sma50.iloc[-1]:
@@ -256,14 +285,12 @@ class BotPredictor:
             
             for model_file in model_files:
                 try:
-                    # Extract symbol from filename (e.g., BTC_model_v8.pth -> BTC)
+                    # Extract symbol from filename
                     symbol = model_file.stem.split('_')[0].upper()
-                    
                     logger.info(f"Loading model for {symbol}...")
                     
                     model = torch.load(model_file, map_location=self.device)
-                    model.eval()  # Inference mode
-                    
+                    model.eval()
                     self.models[symbol] = model
                     logger.info(f"✓ Loaded {symbol} model")
                 
@@ -288,16 +315,7 @@ class BotPredictor:
             logger.error(f"Failed to load bias corrections: {e}")
     
     def _apply_bias_correction(self, symbol: str, prediction: float) -> float:
-        """
-        Apply bias correction to model prediction
-        
-        Args:
-            symbol: Cryptocurrency symbol
-            prediction: Raw model prediction
-        
-        Returns:
-            Corrected prediction
-        """
+        """Apply bias correction to model prediction"""
         if symbol in self.bias_corrections:
             bias = self.bias_corrections[symbol].get('bias', 0)
             scale = self.bias_corrections[symbol].get('scale', 1.0)
@@ -307,13 +325,6 @@ class BotPredictor:
     async def predict(self, symbol: str, timeframe: str = '1h') -> Optional[Dict]:
         """
         Generate trading signal for a symbol
-        
-        Args:
-            symbol: Cryptocurrency symbol (e.g., 'BTC')
-            timeframe: Candle timeframe (1h, 4h, 1d)
-        
-        Returns:
-            Prediction dictionary with signal details
         """
         try:
             # Check if model exists
@@ -323,7 +334,7 @@ class BotPredictor:
             
             trading_pair = f"{symbol}/USDT"
             
-            # 1️⃣ Fetch real-time data from Binance
+            # 1️⃣ Fetch real-time data
             logger.info(f"\n{'='*60}")
             logger.info(f"🔍 Analyzing {symbol}...")
             logger.info(f"{'='*60}")
@@ -339,22 +350,17 @@ class BotPredictor:
             
             # 3️⃣ Technical Analysis
             logger.info(f"\n📊 Technical Analysis:")
-            
-            # Support & Resistance
             support, resistance = self.analyzer.calculate_support_resistance(df)
             logger.info(f"  Support: ${support:.2f}")
             logger.info(f"  Resistance: ${resistance:.2f}")
             
-            # Trend
             trend = self.analyzer.identify_trend(df)
             logger.info(f"  Trend: {trend}")
             
-            # Moving Averages
             mas = self.analyzer.calculate_moving_averages(df)
             logger.info(f"  SMA20: ${mas.get('sma20', 0):.2f}")
             logger.info(f"  SMA50: ${mas.get('sma50', 0):.2f}")
             
-            # Indicators
             rsi = self.analyzer.calculate_rsi(df)
             macd, signal, histogram = self.analyzer.calculate_macd(df)
             atr = self.analyzer.calculate_atr(df)
@@ -362,13 +368,10 @@ class BotPredictor:
             logger.info(f"\n📈 Indicators:")
             logger.info(f"  RSI(14): {rsi:.2f} {'(Overbought)' if rsi > 70 else '(Oversold)' if rsi < 30 else '(Neutral)'}")
             logger.info(f"  MACD: {macd:.6f}")
-            logger.info(f"  Signal: {signal:.6f}")
             logger.info(f"  ATR(14): ${atr:.2f}")
             
             # 4️⃣ Model Prediction
             logger.info(f"\n🤖 Model Prediction:")
-            
-            # Prepare input (last 60 candles)
             recent_prices = df['close'].tail(60).values
             X = torch.tensor(recent_prices, dtype=torch.float32, device=self.device).unsqueeze(0).unsqueeze(1)
             
@@ -377,13 +380,10 @@ class BotPredictor:
                 try:
                     predicted_price = model(X).item()
                 except:
-                    # If model expects different input shape
                     X_flat = torch.tensor(recent_prices, dtype=torch.float32, device=self.device).unsqueeze(0)
                     predicted_price = model(X_flat).item()
             
-            # Apply bias correction
             corrected_price = self._apply_bias_correction(symbol, predicted_price)
-            
             logger.info(f"  Raw Prediction: ${predicted_price:.2f}")
             logger.info(f"  Corrected Prediction: ${corrected_price:.2f}")
             
@@ -392,19 +392,18 @@ class BotPredictor:
             direction = "📈 UP" if price_change > 0 else "📉 DOWN"
             logger.info(f"  Expected Change: {price_change:+.2f}% {direction}")
             
-            # 6️⃣ Identify High/Low Points
-            logger.info(f"\n🎯 Trading Strategy:")
+            # 6️⃣ Identify High/Low Points and Generate Signal
+            logger.info(f"\n🏎️ Trading Strategy:")
             
             if trend == 'UPTREND':
-                # In uptrend: Look for dips to buy
                 if current_price < support:
-                    entry_point = support  # Buy at support
-                    high_point = resistance  # Target resistance
-                    low_point = support * 0.98  # Stop-loss below support
+                    entry_point = support
+                    high_point = resistance
+                    low_point = support * 0.98
                     signal_type = "BUY_STRONG"
                     recommendation = "STRONG BUY at support"
                 elif current_price < mas['sma20']:
-                    entry_point = current_price * 0.99  # Slight dip
+                    entry_point = current_price * 0.99
                     high_point = resistance
                     low_point = support
                     signal_type = "BUY"
@@ -417,15 +416,14 @@ class BotPredictor:
                     recommendation = "HOLD in uptrend"
             
             elif trend == 'DOWNTREND':
-                # In downtrend: Look for bounces to sell
                 if current_price > resistance:
-                    entry_point = resistance  # Short at resistance
-                    low_point = support  # Target support
-                    high_point = resistance * 1.02  # Stop-loss above resistance
+                    entry_point = resistance
+                    low_point = support
+                    high_point = resistance * 1.02
                     signal_type = "SELL_STRONG"
                     recommendation = "STRONG SELL at resistance"
                 elif current_price > mas['sma20']:
-                    entry_point = current_price * 1.01  # Slight bounce
+                    entry_point = current_price * 1.01
                     low_point = support
                     high_point = resistance
                     signal_type = "SELL"
@@ -437,8 +435,7 @@ class BotPredictor:
                     signal_type = "HOLD"
                     recommendation = "HOLD in downtrend"
             
-            else:  # SIDEWAYS
-                # In sideways market: Range trading
+            else:
                 entry_point = (support + resistance) / 2
                 high_point = resistance
                 low_point = support
@@ -446,10 +443,7 @@ class BotPredictor:
                 recommendation = "RANGE TRADE between support and resistance"
             
             # 7️⃣ Calculate Confidence
-            # Confidence based on multiple factors
             confidence_factors = []
-            
-            # Trend confirmation
             if trend == 'UPTREND' and price_change > 0:
                 confidence_factors.append(0.8)
             elif trend == 'DOWNTREND' and price_change < 0:
@@ -457,7 +451,6 @@ class BotPredictor:
             else:
                 confidence_factors.append(0.5)
             
-            # RSI extreme
             if rsi < 30 and trend == 'UPTREND':
                 confidence_factors.append(0.8)
             elif rsi > 70 and trend == 'DOWNTREND':
@@ -465,7 +458,6 @@ class BotPredictor:
             else:
                 confidence_factors.append(0.5)
             
-            # MACD confirmation
             if histogram > 0 and trend == 'UPTREND':
                 confidence_factors.append(0.8)
             elif histogram < 0 and trend == 'DOWNTREND':
@@ -507,7 +499,6 @@ class BotPredictor:
             }
             
             logger.info(f"{'='*60}\n")
-            
             return result
         
         except Exception as e:
@@ -534,8 +525,6 @@ if __name__ == '__main__':
     # Test the predictor
     async def test():
         predictor = BotPredictor()
-        
-        # Test symbols
         test_symbols = ['BTC', 'ETH', 'SOL']
         
         for symbol in test_symbols:
